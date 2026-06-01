@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # DFN WGAN-GP Baseline
 
 This project is a minimal, runnable WGAN-GP baseline for generating 2D DFN (Discrete Fracture Network) binary images. Each DFN image is a single-channel 128 x 128 PNG where 0 is matrix/background and 255 is fracture.
@@ -97,3 +98,7 @@ python src/training/train_wgan_gp.py --config configs/wgan_gp_128.yaml --resume 
 ## Future Extensions
 
 Useful DFN-specific evaluation metrics can be added later, such as fracture length distribution, orientation distribution, connected component counts, percolation probability, and MMD.
+=======
+# -pre
+深度生成project与pre
+>>>>>>> 4bac9798ba3adbab029edf7f837cd43ec9be0fd7
