@@ -30,16 +30,25 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.datasets.dfn_dataset import DFNDataset
+from src.models.flow_matching import weights_init as flow_weights_init
 from src.models.wae import Decoder, Encoder, LatentDiscriminator
 from src.models.wae import weights_init as wae_weights_init
+from src.models.vqvae import weights_init as vqvae_weights_init
 from src.models.wgan_gp import Critic, Generator
 from src.models.wgan_gp import weights_init as wgan_weights_init
+from src.training.train_flow_matching import create_model as create_flow_model
+from src.training.train_flow_matching import create_optimizer as create_flow_optimizer
+from src.training.train_flow_matching import flow_matching_loss, sample_flow
 from src.training.train_wae import mmd_imq
+from src.training.train_vqvae import create_model as create_vqvae_model
+from src.training.train_vqvae import create_optimizer as create_vqvae_optimizer
+from src.training.train_vqvae import save_vqvae_samples, vqvae_loss
 from src.training.train_wgan_gp import gradient_penalty
 from src.utils.device import lightning_accelerator, select_device
 from src.utils.image_utils import save_image_grid
 from src.utils.seed import set_seed
 
+torch.set_float32_matmul_precision("medium")
 
 def load_config(path: str | Path) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as handle:
@@ -287,14 +296,125 @@ class WAELightningModule(pl.LightningModule):
         self.decoder.train()
 
 
+class FlowMatchingLightningModule(pl.LightningModule):
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        self.config = config
+        self.training_cfg = config["training"]
+        self.data_cfg = config["data"]
+        self.sampler_cfg = config.get("sampler", {})
+        self.model_cfg = config["model"]
+        self.model = create_flow_model(config)
+        self.model.apply(flow_weights_init)
+        image_channels = int(self.model_cfg.get("image_channels", 1))
+        image_size = int(self.data_cfg["image_size"])
+        self.fixed_noise = torch.randn(
+            int(self.training_cfg["num_sample_images"]),
+            image_channels,
+            image_size,
+            image_size,
+        )
+
+    def configure_optimizers(self) -> torch.optim.Optimizer:
+        return create_flow_optimizer(self.model, self.training_cfg)
+
+    def training_step(self, real_images: torch.Tensor, batch_idx: int) -> torch.Tensor:
+        loss, metrics = flow_matching_loss(self.model, real_images)
+        self.log_dict(
+            {
+                "loss": loss.detach(),
+                "t_mean": metrics["t_mean"],
+                "target_velocity_norm": metrics["target_velocity_norm"],
+                "predicted_velocity_norm": metrics["predicted_velocity_norm"],
+            },
+            prog_bar=True,
+            on_step=True,
+            on_epoch=False,
+        )
+        return loss
+
+    def save_sample_grid(self, sample_dir: Path, step: int) -> None:
+        self.model.eval()
+        with torch.no_grad():
+            samples = sample_flow(
+                self.model,
+                self.fixed_noise.to(self.device),
+                solver=str(self.sampler_cfg.get("solver", "euler")),
+                num_steps=int(self.sampler_cfg.get("num_steps", 50)),
+            )
+        nrow = int(math.sqrt(int(self.training_cfg["num_sample_images"])))
+        save_image_grid(samples, sample_dir / f"step_{step:07d}.png", nrow=nrow)
+        self.model.train()
+
+
+class VQVAELightningModule(pl.LightningModule):
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        self.config = config
+        self.training_cfg = config["training"]
+        self.data_cfg = config["data"]
+        self.loss_cfg = config.get("loss", {})
+        self.sampling_cfg = config.get("sampling", {})
+        self.model_cfg = config["model"]
+        self.model = create_vqvae_model(config)
+        self.model.apply(vqvae_weights_init)
+
+        dataset = DFNDataset(
+            image_dir=resolve_path(self.data_cfg["image_dir"]),
+            image_size=int(self.data_cfg["image_size"]),
+        )
+        num_sample_images = min(int(self.training_cfg["num_sample_images"]), len(dataset))
+        self.fixed_images = torch.stack([dataset[index] for index in range(num_sample_images)])
+        self.latent_size = int(self.data_cfg["image_size"]) // int(
+            self.model_cfg.get("latent_downsample_factor", 8)
+        )
+
+    def configure_optimizers(self) -> torch.optim.Optimizer:
+        return create_vqvae_optimizer(self.model, self.training_cfg)
+
+    def training_step(self, real_images: torch.Tensor, batch_idx: int) -> torch.Tensor:
+        total_loss, metrics = vqvae_loss(self.model, real_images, self.loss_cfg)
+        self.log_dict(
+            {
+                "total_loss": metrics["total_loss"],
+                "reconstruction_loss": metrics["reconstruction_loss"],
+                "vq_loss": metrics["vq_loss"],
+                "perplexity": metrics["perplexity"],
+                "code_usage": metrics["code_usage"],
+            },
+            prog_bar=True,
+            on_step=True,
+            on_epoch=False,
+        )
+        return total_loss
+
+    def save_sample_grid(self, sample_dir: Path, step: int) -> None:
+        save_vqvae_samples(
+            self.model,
+            self.fixed_images.to(self.device),
+            sample_dir,
+            step,
+            self.fixed_images.size(0),
+            self.latent_size,
+            save_random=bool(self.sampling_cfg.get("save_random_samples", True)),
+        )
+
+
 def create_model(config: dict[str, Any], model_type: str) -> pl.LightningModule:
     if model_type == "auto":
-        model_type = "wae" if "regularizer" in config else "wgan_gp"
+        if config.get("method") in {"flow_matching", "vqvae"}:
+            model_type = str(config["method"])
+        else:
+            model_type = "wae" if "regularizer" in config else "wgan_gp"
     if model_type == "wgan_gp":
         return WGANLightningModule(config)
     if model_type == "wae":
         return WAELightningModule(config)
-    raise ValueError("--model must be one of: auto, wgan_gp, wae")
+    if model_type == "flow_matching":
+        return FlowMatchingLightningModule(config)
+    if model_type == "vqvae":
+        return VQVAELightningModule(config)
+    raise ValueError("--model must be one of: auto, wgan_gp, wae, flow_matching, vqvae")
 
 
 def create_dataloader(config: dict[str, Any]) -> DataLoader:
@@ -363,7 +483,11 @@ def train_lightning(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train DFN generators with Lightning.")
     parser.add_argument("--config", type=Path, default=Path("configs/wgan_gp_128.yaml"))
-    parser.add_argument("--model", choices=("auto", "wgan_gp", "wae"), default="auto")
+    parser.add_argument(
+        "--model",
+        choices=("auto", "wgan_gp", "wae", "flow_matching", "vqvae"),
+        default="auto",
+    )
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--max_steps", type=int, default=None)
     return parser.parse_args()

@@ -1,0 +1,40 @@
+method: vqvae
+
+data:
+  image_dir: data/synthetic_dfn_128/images
+  image_size: 128
+
+model:
+  image_channels: 1
+  hidden_channels: 64
+  embedding_dim: 64
+  num_embeddings: 256
+  commitment_cost: 0.25
+  num_residual_blocks: 2
+  latent_downsample_factor: 8
+
+loss:
+  reconstruction: l1
+  lambda_recon: 1.0
+  lambda_vq: 1.0
+
+training:
+  batch_size: 32
+  num_epochs: 200
+  lr: 0.0002
+  beta1: 0.9
+  beta2: 0.999
+  sample_interval: 500
+  checkpoint_interval: 50
+  num_sample_images: 64
+  seed: 42
+  device: auto
+  precision: bf16-mixed
+
+sampling:
+  save_random_samples: true
+
+outputs:
+  sample_dir: outputs/vqvae/samples
+  checkpoint_dir: outputs/vqvae/checkpoints
+  log_dir: outputs/vqvae/logs

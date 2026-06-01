@@ -1,0 +1,35 @@
+method: flow_matching
+
+data:
+  image_dir: data/synthetic_dfn_128/images
+  image_size: 128
+
+model:
+  image_channels: 1
+  base_channels: 32
+  channel_multipliers: [1, 2, 4, 8]
+  time_embedding_dim: 128
+  groups: 8
+
+training:
+  batch_size: 32
+  num_epochs: 200
+  lr: 0.0001
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 0.0
+  sample_interval: 500
+  checkpoint_interval: 50
+  num_sample_images: 64
+  seed: 42
+  device: auto
+  precision: bf16-mixed
+
+sampler:
+  solver: euler
+  num_steps: 50
+
+outputs:
+  sample_dir: outputs/flow_matching/samples
+  checkpoint_dir: outputs/flow_matching/checkpoints
+  log_dir: outputs/flow_matching/logs

@@ -1,8 +1,8 @@
-# DFN WGAN-GP Baseline
+# DFN Generative Baselines
 
 This project is a minimal, runnable generative baseline for 2D DFN (Discrete Fracture Network) binary images. Each DFN image is a single-channel 128 x 128 PNG where 0 is matrix/background and 255 is fracture.
 
-The current scope is intentionally narrow: WGAN-GP and WAE baselines only. It does not include diffusion models, EDFM or flow validation, or real outcrop data processing.
+The current scope is intentionally narrow: WGAN-GP, WAE, VQ-VAE, and pixel-space Flow Matching baselines. It does not include EDFM or flow validation, or real outcrop data processing.
 
 ## Project Layout
 
@@ -11,13 +11,19 @@ dfn_gan/
   configs/wgan_gp_128.yaml
   configs/wae_mmd_128.yaml
   configs/wae_gan_128.yaml
+  configs/vqvae_128.yaml
+  configs/flow_matching_128.yaml
   data/synthetic_dfn_128/images/
   data/synthetic_dfn_128/metadata/
   src/datasets/dfn_dataset.py
   src/models/wgan_gp.py
   src/models/wae.py
+  src/models/vqvae.py
+  src/models/flow_matching.py
   src/training/train_wgan_gp.py
   src/training/train_wae.py
+  src/training/train_vqvae.py
+  src/training/train_flow_matching.py
   src/training/train_lightning.py
   src/utils/
   src/generate_synthetic_dfn.py
@@ -73,6 +79,36 @@ python src/training/train_wae.py --config configs/wae_gan_128.yaml
 
 WAE sample grids use the same probability and binary PNG format as WGAN-GP, so they can be evaluated by the same `evaluate_dfn.py` script.
 
+## Train VQ-VAE
+
+```bash
+python src/training/train_vqvae.py --config configs/vqvae_128.yaml
+```
+
+For a quick smoke run:
+
+```bash
+python src/training/train_vqvae.py --config configs/vqvae_128.yaml --max_batches 1
+```
+
+The VQ-VAE baseline encodes each DFN image into a 16 x 16 grid of discrete codebook indices, applies straight-through vector quantization, and decodes the quantized features back to image space. It saves reconstruction grids and optional random-code decode grids in the same probability and binary PNG format used by the other trainers. Random-code grids are useful as a sanity check, but VQ-VAE does not learn a latent prior by itself.
+
+## Train Flow Matching
+
+```bash
+python src/training/train_flow_matching.py --config configs/flow_matching_128.yaml
+```
+
+For a quick smoke run:
+
+```bash
+python src/training/train_flow_matching.py --config configs/flow_matching_128.yaml --max_batches 1
+```
+
+The Flow Matching baseline is an unconditional pixel-space Rectified Flow model. During training it samples Gaussian noise `x0`, real images `x1`, interpolates `x_t = (1 - t) * x0 + t * x1`, and trains a time-conditioned UNet to predict velocity `x1 - x0`. Sampling integrates the learned velocity field from noise at `t=0` to images at `t=1`; `sampler.solver` supports `euler`, `heun`, and `midpoint`.
+
+Flow Matching sample grids use the same probability and binary PNG format as WGAN-GP and WAE.
+
 ## Optional Lightning Training
 
 Install dependencies from `requirements.txt`, then run:
@@ -81,6 +117,8 @@ Install dependencies from `requirements.txt`, then run:
 python src/training/train_lightning.py --config configs/wgan_gp_128.yaml
 python src/training/train_lightning.py --config configs/wae_mmd_128.yaml
 python src/training/train_lightning.py --config configs/wae_gan_128.yaml
+python src/training/train_lightning.py --config configs/vqvae_128.yaml --model vqvae
+python src/training/train_lightning.py --config configs/flow_matching_128.yaml --model flow_matching
 ```
 
 Lightning uses the same `device: auto` setting. It writes checkpoints, logs, and sample grids under `lightning/` subdirectories to avoid overwriting manual-training outputs.

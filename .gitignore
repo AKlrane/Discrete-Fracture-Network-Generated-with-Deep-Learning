@@ -10,9 +10,17 @@ outputs/samples/*.png
 outputs/wae_*/checkpoints/*.pt
 outputs/wae_*/logs/*.csv
 outputs/wae_*/samples/*.png
+outputs/vqvae/checkpoints/*.pt
+outputs/vqvae/logs/*.csv
+outputs/vqvae/samples/*.png
+outputs/flow_matching/checkpoints/*.pt
+outputs/flow_matching/logs/*.csv
+outputs/flow_matching/samples/*.png
 outputs/**/lightning/*.ckpt
 outputs/**/lightning/*.csv
 outputs/**/lightning/*.png
 outputs/**/lightning/*.yaml
 data/synthetic_dfn_128/images/*.png
 data/synthetic_dfn_128/metadata/*.json
+
+.DS_Store

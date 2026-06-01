@@ -24,7 +24,7 @@ training:
   num_sample_images: 64
   seed: 42
   device: auto
-  precision: 32-true
+  precision: bf16-mixed
 
 outputs:
   sample_dir: outputs/wae_gan/samples
