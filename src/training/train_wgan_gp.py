@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.datasets.dfn_dataset import DFNDataset
 from src.models.wgan_gp import Critic, Generator, weights_init
 from src.utils.checkpoint import load_checkpoint, save_checkpoint
+from src.utils.device import select_device
 from src.utils.image_utils import save_image_grid
 from src.utils.seed import set_seed
 
@@ -32,12 +33,6 @@ def resolve_path(path: str | Path) -> Path:
     if path.is_absolute():
         return path
     return PROJECT_ROOT / path
-
-
-def select_device(requested: str) -> torch.device:
-    if requested == "cuda" and not torch.cuda.is_available():
-        return torch.device("cpu")
-    return torch.device(requested)
 
 
 def gradient_penalty(

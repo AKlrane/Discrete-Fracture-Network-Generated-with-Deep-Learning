@@ -1,20 +1,24 @@
-<<<<<<< HEAD
 # DFN WGAN-GP Baseline
 
-This project is a minimal, runnable WGAN-GP baseline for generating 2D DFN (Discrete Fracture Network) binary images. Each DFN image is a single-channel 128 x 128 PNG where 0 is matrix/background and 255 is fracture.
+This project is a minimal, runnable generative baseline for 2D DFN (Discrete Fracture Network) binary images. Each DFN image is a single-channel 128 x 128 PNG where 0 is matrix/background and 255 is fracture.
 
-The current scope is intentionally narrow: WGAN-GP only. It does not include diffusion models, EDFM or flow validation, or real outcrop data processing.
+The current scope is intentionally narrow: WGAN-GP and WAE baselines only. It does not include diffusion models, EDFM or flow validation, or real outcrop data processing.
 
 ## Project Layout
 
 ```text
 dfn_gan/
   configs/wgan_gp_128.yaml
+  configs/wae_mmd_128.yaml
+  configs/wae_gan_128.yaml
   data/synthetic_dfn_128/images/
   data/synthetic_dfn_128/metadata/
   src/datasets/dfn_dataset.py
   src/models/wgan_gp.py
+  src/models/wae.py
   src/training/train_wgan_gp.py
+  src/training/train_wae.py
+  src/training/train_lightning.py
   src/utils/
   src/generate_synthetic_dfn.py
   D:/dfn_gan_outputs/dfn_gan_128/samples/
@@ -58,7 +62,30 @@ critic_loss = fake_score.mean() - real_score.mean() + lambda_gp * gradient_penal
 generator_loss = -fake_score.mean()
 ```
 
-It automatically uses CUDA when requested and available, otherwise it falls back to CPU.
+The default config uses `device: auto`, which selects CUDA on Linux GPU hosts, MPS on Apple Silicon Macs, and CPU otherwise. You can also set `device` explicitly to `cuda`, `mps`, or `cpu`.
+
+## Train WAE
+
+```bash
+python src/training/train_wae.py --config configs/wae_mmd_128.yaml
+python src/training/train_wae.py --config configs/wae_gan_128.yaml
+```
+
+WAE sample grids use the same probability and binary PNG format as WGAN-GP, so they can be evaluated by the same `evaluate_dfn.py` script.
+
+## Optional Lightning Training
+
+Install dependencies from `requirements.txt`, then run:
+
+```bash
+python src/training/train_lightning.py --config configs/wgan_gp_128.yaml
+python src/training/train_lightning.py --config configs/wae_mmd_128.yaml
+python src/training/train_lightning.py --config configs/wae_gan_128.yaml
+```
+
+Lightning uses the same `device: auto` setting. It writes checkpoints, logs, and sample grids under `lightning/` subdirectories to avoid overwriting manual-training outputs.
+
+Lightning mixed precision is controlled by `training.precision`. The default is `32-true`; on CUDA Linux you can try `16-mixed` or `bf16-mixed` for AMP. Keep full precision on MPS unless a specific local PyTorch/Lightning build validates mixed precision for your workload.
 
 ## Outputs
 
@@ -98,7 +125,3 @@ python src/training/train_wgan_gp.py --config configs/wgan_gp_128.yaml --resume 
 ## Future Extensions
 
 Useful DFN-specific evaluation metrics can be added later, such as fracture length distribution, orientation distribution, connected component counts, percolation probability, and MMD.
-=======
-# -pre
-深度生成project与pre
->>>>>>> 4bac9798ba3adbab029edf7f837cd43ec9be0fd7

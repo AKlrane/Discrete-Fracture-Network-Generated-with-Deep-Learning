@@ -6,14 +6,18 @@ model:
   latent_dim: 128
   base_channels: 64
 
+regularizer:
+  type: mmd
+  lambda_recon: 1.0
+  lambda_mmd: 10.0
+  imq_scales: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+
 training:
   batch_size: 64
   num_epochs: 200
   lr: 0.0001
   beta1: 0.0
   beta2: 0.9
-  critic_steps: 5
-  lambda_gp: 10.0
   sample_interval: 500
   checkpoint_interval: 50
   num_sample_images: 64
@@ -22,6 +26,6 @@ training:
   precision: 32-true
 
 outputs:
-  sample_dir: outputs/samples
-  checkpoint_dir: outputs/checkpoints
-  log_dir: outputs/logs
+  sample_dir: outputs/wae_mmd/samples
+  checkpoint_dir: outputs/wae_mmd/checkpoints
+  log_dir: outputs/wae_mmd/logs

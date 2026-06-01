@@ -7,6 +7,12 @@ __pycache__/
 outputs/checkpoints/*.pt
 outputs/logs/*.csv
 outputs/samples/*.png
+outputs/wae_*/checkpoints/*.pt
+outputs/wae_*/logs/*.csv
+outputs/wae_*/samples/*.png
+outputs/**/lightning/*.ckpt
+outputs/**/lightning/*.csv
+outputs/**/lightning/*.png
+outputs/**/lightning/*.yaml
 data/synthetic_dfn_128/images/*.png
 data/synthetic_dfn_128/metadata/*.json
-
