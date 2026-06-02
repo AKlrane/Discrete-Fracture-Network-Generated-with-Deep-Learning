@@ -255,8 +255,8 @@ num_epochs = 200
 
 ### 关键差距
 
-- 数据生成：当前 `src/generate_synthetic_dfn.py` 使用均匀位置采样，长度可选 lognormal 或近似 power-law，方向可选 uniform 或 von Mises；没有实现 MPP 的分形位置分布，也没有按论文的 `Dc` 控制裂隙中心聚集程度。
-- 条件约束：当前数据生成没有“已知裂隙存在性”和“注入-监测裂隙连通性”筛选，也没有移除与预设裂隙不连通的孤立裂隙。
+- 数据生成：当前 `src/generate_synthetic_dfn.py` 已加入轻量分形位置采样、可控截断幂律长度和可设置均值/集中度的 von Mises 方向；但它仍是图像线段生成器，不是论文完整 MPP 框架。
+- 条件约束：当前生成器已支持 `preexisting_connectivity` 条件模式，可以在训练样本中强制加入 injection/monitoring 预设裂隙、筛选满足连通性的样本，并移除与预设裂隙网络不连通的孤立随机裂隙；但还没有复现论文 Table 1 的全部五个具体几何案例。
 - 模型结构：当前 `src/models/wgan_gp.py` 是 DCGAN 风格的 ConvTranspose/Conv 网络；论文使用 ResNet 上采样/下采样 block。
 - latent 维度：当前默认 `latent_dim = 128`；论文强调测试极低维 latent space，如 `2/4/8/16/32/64`，并用低维性服务于反演。
 - 验证方法：当前 `src/evaluation/evaluate_dfn.py` 用图像级指标和 Hough 方向直方图；论文使用 EDSR + PHT 提取线段，并进一步拟合 `Dc`、幂律长度参数 `a`、von Mises 参数 `mu/kappa`。
@@ -267,8 +267,8 @@ num_epochs = 200
 
 如果后续希望让本仓库更接近 Teng et al. 的论文方法，优先级可以是：
 
-1. 在合成数据生成器中加入分形位置分布和更可控的幂律长度/von Mises 方向参数。
+1. 继续校准合成数据生成器的分形位置、幂律长度和 von Mises 方向参数，并用线段级统计验证这些参数是否被准确恢复。
 2. 增加低维 latent WGAN-GP 实验，例如 `latent_dim = 8/16/32`，观察生成质量和统计指标变化。
 3. 增加线段级评估：提取裂隙中心、长度、方向，再拟合 `Dc`、`a`、`mu/kappa`。
-4. 构造带预设裂隙和连通筛选的条件训练集，用于测试生成器是否能继承硬约束。
+4. 用新增的条件连通配置生成训练集，训练 WGAN-GP 后统计生成样本对预设裂隙存在性和 injection-monitoring 连通性的继承率。
 5. 在真正做流动反演前，先加入连通性和 flow-path length 这类无需完整物理正演的中间指标。

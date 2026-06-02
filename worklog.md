@@ -237,6 +237,89 @@ sample mean ~= 9.2335
 
 ### 当前注意事项
 
-- 这次只是模仿论文的数据构造部分，不包含论文中的条件连通筛选、EDSR+PHT 线段级统计、EDFM/GEOS 正演或 DREAM(ZS) 反演。
+- 2026-06-02 这次只是模仿论文的基础数据构造部分，当时不包含条件连通筛选、EDSR+PHT 线段级统计、EDFM/GEOS 正演或 DREAM(ZS) 反演。
 - 当前分形采样是轻量近似，适合先复现实验控制项；如果后续要严格对齐论文，应进一步实现完整 MPP 流程和对应的 `Dc` 估计验证。
 - 旧的 `data/synthetic_dfn_128` 不会自动更新。要让训练使用新分布，需要显式重跑生成脚本并把配置中的 `data.image_dir` 指向新输出目录。
+
+## 2026-06-03 条件连通 synthetic dataset 配置
+
+### 背景
+
+这次改动根据 Teng et al. (2025) 条件 DFN 生成小节，把“已知裂隙存在性”和“injection-monitoring 连通性”做成 synthetic dataset 的可选生成模式。核心逻辑是：先随机生成 DFN，再强制加入预设裂隙，检查 injection fracture 是否与所有 monitoring fractures 连通，只保留满足约束的样本，并可移除不连接到预设裂隙网络的孤立随机裂隙。
+
+### 新增配置入口
+
+新增 `configs/dataset/` 子目录，并提供两份论文式条件样本配置：
+
+```text
+configs/dataset/teng_conditioned_lmin5_128.yaml
+configs/dataset/teng_conditioned_lmin10_128.yaml
+```
+
+两份配置都使用：
+
+```text
+unit_system = physical
+domain = 20 x 20 m
+image_size = 128
+position_distribution = fractal
+fractal_dimension = 2.0
+length_distribution = power_law
+power_law_exponent = 2.0
+orientation = von_mises
+von_mises_mean_degrees = -30
+von_mises_kappa = 5
+conditioning.mode = preexisting_connectivity
+```
+
+区别是 `length.min` 分别为 `5.0 m` 和 `10.0 m`。当前示例配置包含 1 条 `injection` 预设裂隙和 2 条 `monitoring` 预设裂隙；要复现论文中 2 到 4 条预设裂隙的不同 case，可以在 YAML 的 `conditioning.preexisting_fractures` 列表中增删条目。
+
+### 新增生成器行为
+
+`src/generate_synthetic_dfn.py` 现在支持：
+
+```bash
+/opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py \
+  --config configs/dataset/teng_conditioned_lmin5_128.yaml
+```
+
+配置文件作为默认参数来源，命令行参数仍可覆盖常用字段。例如 smoke test 可以覆盖样本数和输出目录：
+
+```bash
+/opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py \
+  --config configs/dataset/teng_conditioned_lmin5_128.yaml \
+  --num_samples 3 \
+  --out_dir /tmp/gendl_dfn_conditioned_lmin5 \
+  --max_attempts 5000
+```
+
+条件样本 metadata 会额外记录：
+
+```text
+conditioning.mode
+conditioning.attempt
+conditioning.initial_random_fractures
+conditioning.retained_random_fractures
+conditioning.num_preexisting_fractures
+conditioning.remove_isolated_fractures
+conditioning.connectivity
+```
+
+### 验证记录
+
+已完成的本地检查：
+
+```text
+/opt/anaconda3/bin/conda run -n dfn python -m py_compile src/generate_synthetic_dfn.py
+/opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py --config configs/dataset/teng_conditioned_lmin5_128.yaml --num_samples 3 --out_dir /tmp/gendl_dfn_conditioned_lmin5 --max_attempts 5000
+/opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py --config configs/dataset/teng_conditioned_lmin10_128.yaml --num_samples 3 --out_dir /tmp/gendl_dfn_conditioned_lmin10 --max_attempts 5000
+/opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py --num_samples 2 --image_size 64 --out_dir /tmp/gendl_dfn_default_after_conditioning --seed 7
+```
+
+检查到 `lmin=5 m` smoke metadata 中，第一张样本满足两个 monitoring fractures 均连接 injection fracture，且孤立过滤后 `initial_random_fractures = 50`、`retained_random_fractures = 49`、最终 `num_fractures = 52`。
+
+### 当前注意事项
+
+- 这里复现的是论文条件训练样本的生成逻辑，不是 WGAN-GP 训练后的 12,800 生成样本分析。
+- 当前预设裂隙几何是可运行示例，不是论文 Table 1 的逐 case 坐标复刻；如果拿到 Table 1 的完整坐标，应直接写入 YAML。
+- 条件连通通过图像 8 连通域检查实现，适合当前 binary PNG 训练数据；如果后续改为矢量线段级评估，应补充几何图算法版本。

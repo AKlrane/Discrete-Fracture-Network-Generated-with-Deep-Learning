@@ -1,10 +1,131 @@
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
 from tqdm import tqdm
+import yaml
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+DEFAULT_OPTIONS: dict[str, Any] = {
+    "num_samples": 10000,
+    "image_size": 128,
+    "out_dir": Path("data/synthetic_dfn_128"),
+    "seed": 42,
+    "min_fractures": 20,
+    "max_fractures": 80,
+    "min_length": None,
+    "max_length": None,
+    "min_width": 1,
+    "max_width": 2,
+    "position_distribution": "uniform",
+    "fractal_dimension": 2.0,
+    "fractal_levels": 6,
+    "fixed_cascade_orientation": False,
+    "length_distribution": "lognormal",
+    "power_law_exponent": 2.5,
+    "orientation": "uniform",
+    "von_mises_mean_degrees": 0.0,
+    "von_mises_kappa": 4.0,
+    "unit_system": "pixel",
+    "domain_width": 20.0,
+    "domain_height": 20.0,
+    "conditioning_mode": "none",
+    "preexisting_fractures": [],
+    "remove_isolated_fractures": True,
+    "max_attempts": None,
+}
+
+
+def resolve_path(path: str | Path) -> Path:
+    path = Path(path)
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
+
+
+def load_config(path: str | Path) -> dict[str, Any]:
+    with resolve_path(path).open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+    return config or {}
+
+
+def apply_if_present(options: dict[str, Any], config: dict[str, Any], section: str, key: str, option: str) -> None:
+    section_config = config.get(section, {})
+    if isinstance(section_config, dict) and key in section_config:
+        options[option] = section_config[key]
+
+
+def options_from_config(config: dict[str, Any]) -> dict[str, Any]:
+    options = DEFAULT_OPTIONS.copy()
+
+    apply_if_present(options, config, "dataset", "num_samples", "num_samples")
+    apply_if_present(options, config, "dataset", "image_size", "image_size")
+    apply_if_present(options, config, "dataset", "seed", "seed")
+    apply_if_present(options, config, "output", "out_dir", "out_dir")
+    apply_if_present(options, config, "fractures", "min_fractures", "min_fractures")
+    apply_if_present(options, config, "fractures", "max_fractures", "max_fractures")
+    apply_if_present(options, config, "fractures", "min_width", "min_width")
+    apply_if_present(options, config, "fractures", "max_width", "max_width")
+    apply_if_present(options, config, "position", "distribution", "position_distribution")
+    apply_if_present(options, config, "position", "fractal_dimension", "fractal_dimension")
+    apply_if_present(options, config, "position", "fractal_levels", "fractal_levels")
+    apply_if_present(options, config, "position", "fixed_cascade_orientation", "fixed_cascade_orientation")
+    apply_if_present(options, config, "length", "distribution", "length_distribution")
+    apply_if_present(options, config, "length", "min", "min_length")
+    apply_if_present(options, config, "length", "max", "max_length")
+    apply_if_present(options, config, "length", "power_law_exponent", "power_law_exponent")
+    apply_if_present(options, config, "orientation", "distribution", "orientation")
+    apply_if_present(options, config, "orientation", "von_mises_mean_degrees", "von_mises_mean_degrees")
+    apply_if_present(options, config, "orientation", "von_mises_kappa", "von_mises_kappa")
+    apply_if_present(options, config, "units", "system", "unit_system")
+    apply_if_present(options, config, "units", "domain_width", "domain_width")
+    apply_if_present(options, config, "units", "domain_height", "domain_height")
+
+    conditioning = config.get("conditioning", {})
+    if isinstance(conditioning, dict):
+        options["conditioning_mode"] = conditioning.get("mode", options["conditioning_mode"])
+        options["preexisting_fractures"] = conditioning.get(
+            "preexisting_fractures",
+            options["preexisting_fractures"],
+        )
+        options["remove_isolated_fractures"] = conditioning.get(
+            "remove_isolated_fractures",
+            options["remove_isolated_fractures"],
+        )
+        options["max_attempts"] = conditioning.get("max_attempts", options["max_attempts"])
+
+    return options
+
+
+def x_scale(args: argparse.Namespace) -> float:
+    if args.unit_system == "physical":
+        return (args.image_size - 1) / float(args.domain_width)
+    if args.unit_system == "normalized":
+        return float(args.image_size - 1)
+    return 1.0
+
+
+def y_scale(args: argparse.Namespace) -> float:
+    if args.unit_system == "physical":
+        return (args.image_size - 1) / float(args.domain_height)
+    if args.unit_system == "normalized":
+        return float(args.image_size - 1)
+    return 1.0
+
+
+def length_scale(args: argparse.Namespace) -> float:
+    return 0.5 * (x_scale(args) + y_scale(args))
+
+
+def scale_length_arg(value: float | None, args: argparse.Namespace) -> float | None:
+    if value is None:
+        return None
+    return float(value) * length_scale(args)
 
 
 def sample_angle(
@@ -40,6 +161,34 @@ def sample_length(
     else:
         length = rng.lognormal(mean=np.log((min_length + max_length) / 3.0), sigma=0.55)
     return float(np.clip(length, min_length, max_length))
+
+
+def line_endpoints(fracture: dict[str, Any]) -> tuple[tuple[int, int], tuple[int, int]]:
+    center_x = float(fracture["center_x"])
+    center_y = float(fracture["center_y"])
+    length = float(fracture["length"])
+    angle = float(fracture["angle"])
+    dx = 0.5 * length * np.cos(angle)
+    dy = 0.5 * length * np.sin(angle)
+    return (
+        (int(round(center_x - dx)), int(round(center_y - dy))),
+        (int(round(center_x + dx)), int(round(center_y + dy))),
+    )
+
+
+def draw_fractures(fractures: list[dict[str, Any]], image_size: int) -> np.ndarray:
+    image = np.zeros((image_size, image_size), dtype=np.uint8)
+    for fracture in fractures:
+        p1, p2 = line_endpoints(fracture)
+        cv2.line(
+            image,
+            p1,
+            p2,
+            color=255,
+            thickness=int(fracture["width"]),
+            lineType=cv2.LINE_AA,
+        )
+    return (image > 0).astype(np.uint8) * 255
 
 
 def cascade_probabilities(fractal_dimension: float) -> np.ndarray:
@@ -124,6 +273,91 @@ def make_cascade_permutations(
     return permutations
 
 
+def make_random_fractures(
+    image_size: int,
+    rng: np.random.Generator,
+    min_fractures: int,
+    max_fractures: int,
+    min_length: float,
+    max_length: float,
+    min_width: int,
+    max_width: int,
+    position_distribution: str,
+    fractal_dimension: float,
+    fractal_levels: int,
+    randomize_cascade_orientation: bool,
+    length_distribution: str,
+    power_law_exponent: float,
+    orientation: str,
+    von_mises_mean_degrees: float,
+    von_mises_kappa: float,
+) -> list[dict[str, Any]]:
+    num_fractures = int(rng.integers(min_fractures, max_fractures + 1))
+    fractures = []
+    cascade_permutations = make_cascade_permutations(
+        rng,
+        fractal_levels=fractal_levels,
+        randomize_cascade_orientation=randomize_cascade_orientation,
+    )
+
+    for fracture_index in range(num_fractures):
+        center_x, center_y = sample_center(
+            rng,
+            image_size=image_size,
+            position_distribution=position_distribution,
+            fractal_dimension=fractal_dimension,
+            fractal_levels=fractal_levels,
+            cascade_permutations=cascade_permutations,
+        )
+        length = sample_length(rng, min_length, max_length, length_distribution, power_law_exponent)
+        angle = sample_angle(rng, orientation, von_mises_mean_degrees, von_mises_kappa)
+        width = int(rng.integers(min_width, max_width + 1))
+
+        fractures.append(
+            {
+                "id": f"random_{fracture_index:04d}",
+                "role": "random",
+                "center_x": center_x,
+                "center_y": center_y,
+                "length": length,
+                "angle": angle,
+                "angle_degrees": float(np.rad2deg(angle)),
+                "width": width,
+            }
+        )
+    return fractures
+
+
+def dataset_metadata(
+    sample_id: int,
+    image_size: int,
+    fractures: list[dict[str, Any]],
+    args: argparse.Namespace,
+    min_length_pixels: float,
+    max_length_pixels: float,
+) -> dict[str, Any]:
+    return {
+        "sample_id": sample_id,
+        "image_size": image_size,
+        "num_fractures": len(fractures),
+        "position_distribution": args.position_distribution,
+        "fractal_dimension": args.fractal_dimension if args.position_distribution == "fractal" else None,
+        "fractal_levels": args.fractal_levels if args.position_distribution == "fractal" else None,
+        "length_distribution": args.length_distribution,
+        "min_length_pixels": min_length_pixels,
+        "max_length_pixels": max_length_pixels,
+        "power_law_exponent": args.power_law_exponent if args.length_distribution == "power_law" else None,
+        "orientation": args.orientation,
+        "von_mises_mean_degrees": args.von_mises_mean_degrees if args.orientation == "von_mises" else None,
+        "von_mises_kappa": args.von_mises_kappa if args.orientation == "von_mises" else None,
+        "unit_system": args.unit_system,
+        "domain_width": args.domain_width if args.unit_system == "physical" else None,
+        "domain_height": args.domain_height if args.unit_system == "physical" else None,
+        "conditioning_mode": args.conditioning_mode,
+        "fractures": fractures,
+    }
+
+
 def make_dfn_sample(
     sample_id: int,
     image_size: int,
@@ -143,75 +377,237 @@ def make_dfn_sample(
     orientation: str,
     von_mises_mean_degrees: float,
     von_mises_kappa: float,
+    args: argparse.Namespace,
 ) -> tuple[np.ndarray, dict]:
-    image = np.zeros((image_size, image_size), dtype=np.uint8)
-    num_fractures = int(rng.integers(min_fractures, max_fractures + 1))
-    fractures = []
-    cascade_permutations = make_cascade_permutations(
-        rng,
+    fractures = make_random_fractures(
+        image_size=image_size,
+        rng=rng,
+        min_fractures=min_fractures,
+        max_fractures=max_fractures,
+        min_length=min_length,
+        max_length=max_length,
+        min_width=min_width,
+        max_width=max_width,
+        position_distribution=position_distribution,
+        fractal_dimension=fractal_dimension,
         fractal_levels=fractal_levels,
         randomize_cascade_orientation=randomize_cascade_orientation,
+        length_distribution=length_distribution,
+        power_law_exponent=power_law_exponent,
+        orientation=orientation,
+        von_mises_mean_degrees=von_mises_mean_degrees,
+        von_mises_kappa=von_mises_kappa,
     )
 
-    for _ in range(num_fractures):
-        center_x, center_y = sample_center(
-            rng,
-            image_size=image_size,
-            position_distribution=position_distribution,
-            fractal_dimension=fractal_dimension,
-            fractal_levels=fractal_levels,
-            cascade_permutations=cascade_permutations,
-        )
-        length = sample_length(rng, min_length, max_length, length_distribution, power_law_exponent)
-        angle = sample_angle(rng, orientation, von_mises_mean_degrees, von_mises_kappa)
-        width = int(rng.integers(min_width, max_width + 1))
+    image = draw_fractures(fractures, image_size)
+    metadata = dataset_metadata(sample_id, image_size, fractures, args, min_length, max_length)
+    return image, metadata
 
-        dx = 0.5 * length * np.cos(angle)
-        dy = 0.5 * length * np.sin(angle)
-        x1 = int(round(center_x - dx))
-        y1 = int(round(center_y - dy))
-        x2 = int(round(center_x + dx))
-        y2 = int(round(center_y + dy))
-        cv2.line(image, (x1, y1), (x2, y2), color=255, thickness=width, lineType=cv2.LINE_AA)
 
+def parse_preexisting_fractures(args: argparse.Namespace) -> list[dict[str, Any]]:
+    fractures = []
+    for index, fracture in enumerate(args.preexisting_fractures):
+        if not isinstance(fracture, dict):
+            raise ValueError("conditioning.preexisting_fractures entries must be mappings")
+
+        role = str(fracture.get("role", "injection" if index == 0 else "monitoring"))
+        if role not in {"injection", "monitoring"}:
+            raise ValueError("preexisting fracture role must be 'injection' or 'monitoring'")
+        if "angle" in fracture:
+            angle = float(fracture["angle"])
+        else:
+            angle = float(np.deg2rad(float(fracture.get("angle_degrees", 0.0))))
+
+        center_x = float(fracture["center_x"]) * x_scale(args)
+        center_y = float(fracture["center_y"]) * y_scale(args)
+        length = float(fracture["length"]) * length_scale(args)
+        width = int(fracture.get("width", args.max_width))
         fractures.append(
             {
+                "id": str(fracture.get("id", f"preexisting_{index:02d}")),
+                "role": role,
                 "center_x": center_x,
                 "center_y": center_y,
                 "length": length,
-                "angle": angle,
+                "angle": angle % np.pi,
+                "angle_degrees": float(np.rad2deg(angle % np.pi)),
                 "width": width,
+                "source": "preexisting",
             }
         )
 
-    image = (image > 0).astype(np.uint8) * 255
-    metadata = {
-        "sample_id": sample_id,
-        "image_size": image_size,
-        "num_fractures": num_fractures,
-        "position_distribution": position_distribution,
-        "fractal_dimension": fractal_dimension if position_distribution == "fractal" else None,
-        "fractal_levels": fractal_levels if position_distribution == "fractal" else None,
-        "length_distribution": length_distribution,
-        "power_law_exponent": power_law_exponent if length_distribution == "power_law" else None,
-        "orientation": orientation,
-        "von_mises_mean_degrees": von_mises_mean_degrees if orientation == "von_mises" else None,
-        "von_mises_kappa": von_mises_kappa if orientation == "von_mises" else None,
-        "fractures": fractures,
+    injection_count = sum(fracture["role"] == "injection" for fracture in fractures)
+    monitoring_count = sum(fracture["role"] == "monitoring" for fracture in fractures)
+    if injection_count != 1:
+        raise ValueError("preexisting connectivity conditioning requires exactly one injection fracture")
+    if monitoring_count < 1:
+        raise ValueError("preexisting connectivity conditioning requires at least one monitoring fracture")
+    return fractures
+
+
+def fracture_component_labels(labels: np.ndarray, fracture: dict[str, Any], image_size: int) -> set[int]:
+    mask = draw_fractures([fracture], image_size) > 0
+    return {int(label) for label in np.unique(labels[mask]) if int(label) != 0}
+
+
+def connectivity_status(
+    fractures: list[dict[str, Any]],
+    preexisting_fractures: list[dict[str, Any]],
+    image_size: int,
+) -> tuple[bool, dict[str, Any], np.ndarray]:
+    binary = (draw_fractures(fractures, image_size) > 0).astype(np.uint8)
+    _, labels = cv2.connectedComponents(binary, connectivity=8)
+
+    injection = next(fracture for fracture in preexisting_fractures if fracture["role"] == "injection")
+    injection_labels = fracture_component_labels(labels, injection, image_size)
+    monitoring_results = []
+    all_connected = bool(injection_labels)
+
+    for fracture in preexisting_fractures:
+        if fracture["role"] != "monitoring":
+            continue
+        labels_for_fracture = fracture_component_labels(labels, fracture, image_size)
+        connected = bool(injection_labels & labels_for_fracture)
+        all_connected = all_connected and connected
+        monitoring_results.append(
+            {
+                "id": fracture["id"],
+                "connected_to_injection": connected,
+            }
+        )
+
+    return (
+        all_connected,
+        {
+            "injection_id": injection["id"],
+            "monitoring": monitoring_results,
+        },
+        labels,
+    )
+
+
+def remove_isolated_random_fractures(
+    random_fractures: list[dict[str, Any]],
+    preexisting_fractures: list[dict[str, Any]],
+    labels: np.ndarray,
+    image_size: int,
+) -> list[dict[str, Any]]:
+    retained_labels = set()
+    for fracture in preexisting_fractures:
+        retained_labels.update(fracture_component_labels(labels, fracture, image_size))
+
+    retained_random = []
+    for fracture in random_fractures:
+        if fracture_component_labels(labels, fracture, image_size) & retained_labels:
+            retained_random.append(fracture)
+    return retained_random
+
+
+def make_conditioned_dfn_sample(
+    sample_id: int,
+    attempt: int,
+    image_size: int,
+    rng: np.random.Generator,
+    args: argparse.Namespace,
+    min_length: float,
+    max_length: float,
+    preexisting_fractures: list[dict[str, Any]],
+) -> tuple[np.ndarray, dict] | None:
+    random_fractures = make_random_fractures(
+        image_size=image_size,
+        rng=rng,
+        min_fractures=args.min_fractures,
+        max_fractures=args.max_fractures,
+        min_length=min_length,
+        max_length=max_length,
+        min_width=args.min_width,
+        max_width=args.max_width,
+        position_distribution=args.position_distribution,
+        fractal_dimension=args.fractal_dimension,
+        fractal_levels=args.fractal_levels,
+        randomize_cascade_orientation=not args.fixed_cascade_orientation,
+        length_distribution=args.length_distribution,
+        power_law_exponent=args.power_law_exponent,
+        orientation=args.orientation,
+        von_mises_mean_degrees=args.von_mises_mean_degrees,
+        von_mises_kappa=args.von_mises_kappa,
+    )
+    fractures = [*random_fractures, *preexisting_fractures]
+    connected, connectivity, labels = connectivity_status(fractures, preexisting_fractures, image_size)
+    if not connected:
+        return None
+
+    retained_random = random_fractures
+    if args.remove_isolated_fractures:
+        retained_random = remove_isolated_random_fractures(
+            random_fractures,
+            preexisting_fractures,
+            labels,
+            image_size,
+        )
+    final_fractures = [*retained_random, *preexisting_fractures]
+    image = draw_fractures(final_fractures, image_size)
+    metadata = dataset_metadata(sample_id, image_size, final_fractures, args, min_length, max_length)
+    metadata["conditioning"] = {
+        "mode": args.conditioning_mode,
+        "attempt": attempt,
+        "initial_random_fractures": len(random_fractures),
+        "retained_random_fractures": len(retained_random),
+        "num_preexisting_fractures": len(preexisting_fractures),
+        "remove_isolated_fractures": args.remove_isolated_fractures,
+        "connectivity": connectivity,
     }
     return image, metadata
 
 
 def generate_dataset(args: argparse.Namespace) -> None:
-    out_dir = Path(args.out_dir)
+    out_dir = resolve_path(args.out_dir)
     image_dir = out_dir / "images"
     metadata_dir = out_dir / "metadata"
     image_dir.mkdir(parents=True, exist_ok=True)
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
     rng = np.random.default_rng(args.seed)
-    min_length = args.min_length or args.image_size * 0.08
-    max_length = args.max_length or args.image_size * 0.65
+    min_length = scale_length_arg(args.min_length, args) or args.image_size * 0.08
+    max_length = scale_length_arg(args.max_length, args) or args.image_size * 0.65
+
+    if args.conditioning_mode == "preexisting_connectivity":
+        preexisting_fractures = parse_preexisting_fractures(args)
+        max_attempts = args.max_attempts or max(args.num_samples * 1000, 1000)
+        sample_id = 0
+        attempt = 0
+        progress = tqdm(total=args.num_samples, desc="Generating conditioned DFN samples")
+        while sample_id < args.num_samples and attempt < max_attempts:
+            attempt += 1
+            result = make_conditioned_dfn_sample(
+                sample_id=sample_id,
+                attempt=attempt,
+                image_size=args.image_size,
+                rng=rng,
+                args=args,
+                min_length=min_length,
+                max_length=max_length,
+                preexisting_fractures=preexisting_fractures,
+            )
+            if result is None:
+                continue
+            image, metadata = result
+            stem = f"dfn_{sample_id:06d}"
+            cv2.imwrite(str(image_dir / f"{stem}.png"), image)
+            with (metadata_dir / f"{stem}.json").open("w", encoding="utf-8") as handle:
+                json.dump(metadata, handle, indent=2)
+            sample_id += 1
+            progress.update(1)
+        progress.close()
+        if sample_id < args.num_samples:
+            raise RuntimeError(
+                f"Only generated {sample_id} conditioned samples after {attempt} attempts. "
+                "Relax connectivity constraints or increase conditioning.max_attempts."
+            )
+        return
+
+    if args.conditioning_mode != "none":
+        raise ValueError("conditioning_mode must be either 'none' or 'preexisting_connectivity'")
 
     for sample_id in tqdm(range(args.num_samples), desc="Generating DFN samples"):
         image, metadata = make_dfn_sample(
@@ -233,6 +629,7 @@ def generate_dataset(args: argparse.Namespace) -> None:
             orientation=args.orientation,
             von_mises_mean_degrees=args.von_mises_mean_degrees,
             von_mises_kappa=args.von_mises_kappa,
+            args=args,
         )
         stem = f"dfn_{sample_id:06d}"
         cv2.imwrite(str(image_dir / f"{stem}.png"), image)
@@ -241,31 +638,64 @@ def generate_dataset(args: argparse.Namespace) -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", type=Path, default=None)
+    pre_args, _ = pre_parser.parse_known_args()
+
+    defaults = DEFAULT_OPTIONS.copy()
+    if pre_args.config is not None:
+        defaults = options_from_config(load_config(pre_args.config))
+
     parser = argparse.ArgumentParser(description="Generate a synthetic 2D DFN PNG dataset.")
-    parser.add_argument("--num_samples", type=int, default=10000)
-    parser.add_argument("--image_size", type=int, default=128)
-    parser.add_argument("--out_dir", type=Path, default=Path("data/synthetic_dfn_128"))
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--min_fractures", type=int, default=20)
-    parser.add_argument("--max_fractures", type=int, default=80)
-    parser.add_argument("--min_length", type=float, default=None)
-    parser.add_argument("--max_length", type=float, default=None)
-    parser.add_argument("--min_width", type=int, default=1)
-    parser.add_argument("--max_width", type=int, default=2)
-    parser.add_argument("--position_distribution", choices=("uniform", "fractal"), default="uniform")
-    parser.add_argument("--fractal_dimension", type=float, default=2.0)
-    parser.add_argument("--fractal_levels", type=int, default=6)
+    parser.add_argument("--config", type=Path, default=pre_args.config)
+    parser.add_argument("--num_samples", type=int, default=defaults["num_samples"])
+    parser.add_argument("--image_size", type=int, default=defaults["image_size"])
+    parser.add_argument("--out_dir", type=Path, default=Path(defaults["out_dir"]))
+    parser.add_argument("--seed", type=int, default=defaults["seed"])
+    parser.add_argument("--min_fractures", type=int, default=defaults["min_fractures"])
+    parser.add_argument("--max_fractures", type=int, default=defaults["max_fractures"])
+    parser.add_argument("--min_length", type=float, default=defaults["min_length"])
+    parser.add_argument("--max_length", type=float, default=defaults["max_length"])
+    parser.add_argument("--min_width", type=int, default=defaults["min_width"])
+    parser.add_argument("--max_width", type=int, default=defaults["max_width"])
+    parser.add_argument("--position_distribution", choices=("uniform", "fractal"), default=defaults["position_distribution"])
+    parser.add_argument("--fractal_dimension", type=float, default=defaults["fractal_dimension"])
+    parser.add_argument("--fractal_levels", type=int, default=defaults["fractal_levels"])
     parser.add_argument(
         "--fixed_cascade_orientation",
         action="store_true",
+        default=defaults["fixed_cascade_orientation"],
         help="Keep the dominant quadrant fixed across cascade levels instead of randomizing it.",
     )
-    parser.add_argument("--length_distribution", choices=("lognormal", "power_law"), default="lognormal")
-    parser.add_argument("--power_law_exponent", type=float, default=2.5)
-    parser.add_argument("--orientation", choices=("uniform", "von_mises"), default="uniform")
-    parser.add_argument("--von_mises_mean_degrees", type=float, default=0.0)
-    parser.add_argument("--von_mises_kappa", type=float, default=4.0)
-    return parser.parse_args()
+    parser.add_argument("--length_distribution", choices=("lognormal", "power_law"), default=defaults["length_distribution"])
+    parser.add_argument("--power_law_exponent", type=float, default=defaults["power_law_exponent"])
+    parser.add_argument("--orientation", choices=("uniform", "von_mises"), default=defaults["orientation"])
+    parser.add_argument("--von_mises_mean_degrees", type=float, default=defaults["von_mises_mean_degrees"])
+    parser.add_argument("--von_mises_kappa", type=float, default=defaults["von_mises_kappa"])
+    parser.add_argument("--unit_system", choices=("pixel", "normalized", "physical"), default=defaults["unit_system"])
+    parser.add_argument("--domain_width", type=float, default=defaults["domain_width"])
+    parser.add_argument("--domain_height", type=float, default=defaults["domain_height"])
+    parser.add_argument(
+        "--conditioning_mode",
+        choices=("none", "preexisting_connectivity"),
+        default=defaults["conditioning_mode"],
+    )
+    parser.add_argument("--max_attempts", type=int, default=defaults["max_attempts"])
+    parser.set_defaults(remove_isolated_fractures=bool(defaults["remove_isolated_fractures"]))
+    isolation_group = parser.add_mutually_exclusive_group()
+    isolation_group.add_argument(
+        "--remove_isolated_fractures",
+        dest="remove_isolated_fractures",
+        action="store_true",
+    )
+    isolation_group.add_argument(
+        "--keep_isolated_fractures",
+        dest="remove_isolated_fractures",
+        action="store_false",
+    )
+    args = parser.parse_args()
+    args.preexisting_fractures = defaults["preexisting_fractures"]
+    return args
 
 
 if __name__ == "__main__":
