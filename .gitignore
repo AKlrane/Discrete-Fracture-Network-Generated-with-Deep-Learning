@@ -16,10 +16,13 @@ outputs/vqvae/samples/*.png
 outputs/flow_matching/checkpoints/*.pt
 outputs/flow_matching/logs/*.csv
 outputs/flow_matching/samples/*.png
+outputs/**/samples/**/*.png
+outputs/**/samples/**/*.json
 outputs/**/lightning/*.ckpt
 outputs/**/lightning/*.csv
 outputs/**/lightning/*.png
 outputs/**/lightning/*.yaml
+outputs/**/*_curves.png
 data/synthetic_dfn_128/images/*.png
 data/synthetic_dfn_128/metadata/*.json
 

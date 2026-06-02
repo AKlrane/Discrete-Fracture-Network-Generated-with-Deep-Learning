@@ -79,6 +79,14 @@ python src/training/train_wae.py --config configs/wae_gan_128.yaml
 
 WAE sample grids use the same probability and binary PNG format as WGAN-GP, so they can be evaluated by the same `evaluate_dfn.py` script.
 
+The WAE-MMD config uses a binary-image reconstruction preset:
+
+```text
+reconstruction_loss = bce_weight * BCE(probability, target) + (1 - bce_weight) * DiceLoss(probability, target)
+```
+
+The trainer maps decoder outputs and normalized dataset tensors from `[-1, 1]` back to `[0, 1]` before computing BCE and Dice. WAE-GAN keeps the previous L1 reconstruction loss unless its config opts into `regularizer.reconstruction_loss: bce_dice`.
+
 ## Train VQ-VAE
 
 ```bash

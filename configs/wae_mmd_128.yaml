@@ -8,6 +8,10 @@ model:
 
 regularizer:
   type: mmd
+  reconstruction_loss: bce_dice
+  bce_weight: 0.5
+  dice_smooth: 1.0
+  probability_eps: 0.000001
   lambda_recon: 1.0
   lambda_mmd: 10.0
   imq_scales: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]

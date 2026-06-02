@@ -78,6 +78,47 @@ def mmd_imq(encoded: torch.Tensor, prior: torch.Tensor, scales: list[float]) -> 
     return encoded_term + prior_term - 2.0 * k_cross.mean()
 
 
+def _tanh_range_to_probability(images: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    return ((images + 1.0) / 2.0).clamp(eps, 1.0 - eps)
+
+
+def dice_loss(
+    predicted_probability: torch.Tensor,
+    target_probability: torch.Tensor,
+    smooth: float = 1.0,
+) -> torch.Tensor:
+    predicted_flat = predicted_probability.flatten(start_dim=1)
+    target_flat = target_probability.flatten(start_dim=1)
+    intersection = (predicted_flat * target_flat).sum(dim=1)
+    denominator = predicted_flat.sum(dim=1) + target_flat.sum(dim=1)
+    score = (2.0 * intersection + smooth) / (denominator + smooth)
+    return 1.0 - score.mean()
+
+
+def wae_reconstruction_loss(
+    reconstructed: torch.Tensor,
+    real_images: torch.Tensor,
+    regularizer_cfg: dict[str, Any],
+) -> torch.Tensor:
+    loss_type = str(regularizer_cfg.get("reconstruction_loss", "l1")).lower()
+    if loss_type == "l1":
+        return F.l1_loss(reconstructed, real_images)
+    if loss_type != "bce_dice":
+        raise ValueError("regularizer.reconstruction_loss must be either 'l1' or 'bce_dice'")
+
+    bce_weight = float(regularizer_cfg.get("bce_weight", 0.5))
+    if not 0.0 <= bce_weight <= 1.0:
+        raise ValueError("regularizer.bce_weight must be in [0, 1]")
+
+    eps = float(regularizer_cfg.get("probability_eps", 1e-6))
+    smooth = float(regularizer_cfg.get("dice_smooth", 1.0))
+    predicted_probability = _tanh_range_to_probability(reconstructed, eps=eps)
+    target_probability = _tanh_range_to_probability(real_images, eps=eps)
+    bce = F.binary_cross_entropy(predicted_probability, target_probability)
+    dice = dice_loss(predicted_probability, target_probability, smooth=smooth)
+    return bce_weight * bce + (1.0 - bce_weight) * dice
+
+
 def save_wae_checkpoint(
     path: str | Path,
     encoder: Encoder,
@@ -260,7 +301,11 @@ def train(config: dict[str, Any], resume: str | Path | None = None, max_batches:
 
             encoded = encoder(real_images)
             reconstructed = decoder(encoded)
-            reconstruction_loss = F.l1_loss(reconstructed, real_images)
+            reconstruction_loss = wae_reconstruction_loss(
+                reconstructed,
+                real_images,
+                regularizer_cfg,
+            )
 
             if regularizer_type == "mmd":
                 prior_z = torch.randn_like(encoded)

@@ -39,7 +39,7 @@ from src.models.wgan_gp import weights_init as wgan_weights_init
 from src.training.train_flow_matching import create_model as create_flow_model
 from src.training.train_flow_matching import create_optimizer as create_flow_optimizer
 from src.training.train_flow_matching import flow_matching_loss, sample_flow
-from src.training.train_wae import mmd_imq
+from src.training.train_wae import mmd_imq, wae_reconstruction_loss
 from src.training.train_vqvae import create_model as create_vqvae_model
 from src.training.train_vqvae import create_optimizer as create_vqvae_optimizer
 from src.training.train_vqvae import save_vqvae_samples, vqvae_loss
@@ -246,7 +246,11 @@ class WAELightningModule(pl.LightningModule):
 
         encoded = self.encoder(real_images)
         reconstructed = self.decoder(encoded)
-        reconstruction_loss = F.l1_loss(reconstructed, real_images)
+        reconstruction_loss = wae_reconstruction_loss(
+            reconstructed,
+            real_images,
+            self.regularizer_cfg,
+        )
         lambda_recon = float(self.regularizer_cfg.get("lambda_recon", 1.0))
 
         if self.regularizer_type == "mmd":
