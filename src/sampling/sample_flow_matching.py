@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 import yaml
+from torchvision.utils import save_image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -102,6 +103,34 @@ def default_output_path(
     return out_dir / f"{out_prefix}.png"
 
 
+def save_individual_images(
+    images: torch.Tensor,
+    out_path: str | Path,
+    threshold: float = 0.0,
+) -> tuple[Path, Path]:
+    """Save one probability PNG and one binary PNG per sampled image."""
+    out_path = Path(out_path)
+    probability_dir = out_path.with_name(f"{out_path.stem}_prob")
+    binary_dir = out_path.with_name(f"{out_path.stem}_binary")
+    probability_dir.mkdir(parents=True, exist_ok=True)
+    binary_dir.mkdir(parents=True, exist_ok=True)
+
+    probability = ((images.detach().cpu() + 1.0) / 2.0).clamp(0.0, 1.0)
+    binary = (images.detach().cpu() > threshold).float()
+    for index, (probability_image, binary_image) in enumerate(zip(probability, binary)):
+        save_image(
+            probability_image,
+            probability_dir / f"sample_{index:06d}.png",
+            normalize=False,
+        )
+        save_image(
+            binary_image,
+            binary_dir / f"sample_{index:06d}.png",
+            normalize=False,
+        )
+    return probability_dir, binary_dir
+
+
 @torch.no_grad()
 def sample_in_batches(
     model: torch.nn.Module,
@@ -161,6 +190,9 @@ def sample_from_checkpoint(args: argparse.Namespace) -> tuple[Path, Path]:
     device = select_device(args.device or str(training_cfg.get("device", "auto")))
     num_images = args.num_images if args.num_images is not None else int(training_cfg.get("num_sample_images", 64))
     batch_size = args.batch_size if args.batch_size is not None else num_images
+    save_mode = args.save_mode or str(sampler_cfg.get("save_mode", "grid"))
+    if save_mode not in {"grid", "individual", "both"}:
+        raise ValueError("--save_mode must be one of: grid, individual, both")
     image_channels = int(model_cfg.get("image_channels", 1))
     image_size = int(data_cfg["image_size"])
     nrow = args.nrow or int(math.sqrt(num_images))
@@ -190,12 +222,23 @@ def sample_from_checkpoint(args: argparse.Namespace) -> tuple[Path, Path]:
         num_steps=num_steps,
         seed=seed,
     )
-    probability_path, binary_path = save_image_grid(
-        samples,
-        out_path,
-        nrow=nrow,
-        threshold=float(args.threshold),
-    )
+    probability_path: Path | None = None
+    binary_path: Path | None = None
+    probability_dir: Path | None = None
+    binary_dir: Path | None = None
+    if save_mode in {"grid", "both"}:
+        probability_path, binary_path = save_image_grid(
+            samples,
+            out_path,
+            nrow=nrow,
+            threshold=float(args.threshold),
+        )
+    if save_mode in {"individual", "both"}:
+        probability_dir, binary_dir = save_individual_images(
+            samples,
+            out_path,
+            threshold=float(args.threshold),
+        )
 
     metadata_path = out_path.with_name(f"{out_path.stem}_metadata.json")
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
@@ -211,18 +254,28 @@ def sample_from_checkpoint(args: argparse.Namespace) -> tuple[Path, Path]:
                 "seed": seed,
                 "solver": solver,
                 "num_steps": num_steps,
+                "save_mode": save_mode,
                 "threshold": float(args.threshold),
-                "probability_path": str(probability_path),
-                "binary_path": str(binary_path),
+                "probability_path": str(probability_path) if probability_path is not None else None,
+                "binary_path": str(binary_path) if binary_path is not None else None,
+                "probability_dir": str(probability_dir) if probability_dir is not None else None,
+                "binary_dir": str(binary_dir) if binary_dir is not None else None,
             },
             handle,
             indent=2,
         )
 
-    print(f"Wrote probability grid to {probability_path}")
-    print(f"Wrote binary grid to {binary_path}")
+    if probability_path is not None and binary_path is not None:
+        print(f"Wrote probability grid to {probability_path}")
+        print(f"Wrote binary grid to {binary_path}")
+    if probability_dir is not None and binary_dir is not None:
+        print(f"Wrote individual probability images to {probability_dir}")
+        print(f"Wrote individual binary images to {binary_dir}")
     print(f"Wrote metadata to {metadata_path}")
-    return probability_path, binary_path
+    return (
+        probability_path if probability_path is not None else probability_dir,
+        binary_path if binary_path is not None else binary_dir,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -245,6 +298,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--solver", choices=("euler", "heun", "midpoint"), default=None)
     parser.add_argument("--num_steps", type=int, default=None)
+    parser.add_argument(
+        "--save_mode",
+        choices=("grid", "individual", "both"),
+        default=None,
+        help="Save output as a grid, individual images, or both. Defaults to sampler.save_mode or grid.",
+    )
     parser.add_argument("--nrow", type=int, default=None)
     parser.add_argument("--threshold", type=float, default=0.0)
     return parser.parse_args()

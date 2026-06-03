@@ -117,6 +117,16 @@ The Flow Matching baseline is an unconditional pixel-space Rectified Flow model.
 
 Flow Matching sample grids use the same probability and binary PNG format as WGAN-GP and WAE.
 
+By default Flow Matching samples training time `t` uniformly and keeps a fixed learning rate. To bias training time toward high-`t` denoising, set `training.time_sampling.distribution: beta` and tune `beta_alpha` / `beta_beta`. To enable warmup plus cosine learning-rate decay, set `training.scheduler.enabled: true`; older configs and checkpoints remain compatible when these fields are absent or disabled.
+
+To resample from a trained Flow Matching `.pt` or Lightning `.ckpt` checkpoint, use:
+
+```bash
+python src/sampling/sample_flow_matching.py --config configs/flow_matching_128.yaml --checkpoint outputs/flow_matching/checkpoints/flow_matching_latest.pt --num_images 256 --batch_size 32
+```
+
+The default output is still a probability grid plus a binary grid. Add `--save_mode individual` to save one PNG per sample under separate `_prob` and `_binary` directories, or use `--save_mode both` to write both individual images and grids.
+
 ## Optional Lightning Training
 
 Install dependencies from `requirements.txt`, then run:

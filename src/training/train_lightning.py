@@ -37,6 +37,7 @@ from src.models.vqvae import weights_init as vqvae_weights_init
 from src.models.wgan_gp import Critic, Generator
 from src.models.wgan_gp import weights_init as wgan_weights_init
 from src.training.train_flow_matching import create_model as create_flow_model
+from src.training.train_flow_matching import create_lr_scheduler as create_flow_lr_scheduler
 from src.training.train_flow_matching import create_optimizer as create_flow_optimizer
 from src.training.train_flow_matching import flow_matching_loss, sample_flow
 from src.training.train_wae import mmd_imq, wae_reconstruction_loss
@@ -319,11 +320,23 @@ class FlowMatchingLightningModule(pl.LightningModule):
             image_size,
         )
 
-    def configure_optimizers(self) -> torch.optim.Optimizer:
-        return create_flow_optimizer(self.model, self.training_cfg)
+    def configure_optimizers(self) -> torch.optim.Optimizer | dict[str, object]:
+        optimizer = create_flow_optimizer(self.model, self.training_cfg)
+        total_steps = int(getattr(self.trainer, "estimated_stepping_batches", 0) or 0)
+        scheduler = create_flow_lr_scheduler(optimizer, self.training_cfg, total_steps)
+        if scheduler is None:
+            return optimizer
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            },
+        }
 
     def training_step(self, real_images: torch.Tensor, batch_idx: int) -> torch.Tensor:
-        loss, metrics = flow_matching_loss(self.model, real_images)
+        loss, metrics = flow_matching_loss(self.model, real_images, self.training_cfg)
         self.log_dict(
             {
                 "loss": loss.detach(),

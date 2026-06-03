@@ -13,7 +13,7 @@ model:
 
 training:
   batch_size: 64
-  num_epochs: 200
+  num_epochs: 100
   lr: 0.0001
   beta1: 0.9
   beta2: 0.999
@@ -25,11 +25,11 @@ training:
   device: auto
   precision: bf16-mixed
   time_sampling:
-    distribution: uniform
+    distribution: beta
     beta_alpha: 2.0
     beta_beta: 1.0
   scheduler:
-    enabled: false
+    enabled: true
     type: cosine
     warmup_steps: 5000
     min_lr: 0.000001
@@ -39,6 +39,6 @@ sampler:
   num_steps: 100
 
 outputs:
-  sample_dir: outputs/flow_matching_teng_50H/samples
-  checkpoint_dir: outputs/flow_matching_teng_50H/checkpoints
-  log_dir: outputs/flow_matching_teng_50H/logs
+  sample_dir: outputs/flow_matching_teng_50H_new/samples
+  checkpoint_dir: outputs/flow_matching_teng_50H_new/checkpoints
+  log_dir: outputs/flow_matching_teng_50H_new/logs

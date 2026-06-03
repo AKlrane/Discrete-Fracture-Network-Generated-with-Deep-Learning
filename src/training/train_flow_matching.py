@@ -78,13 +78,104 @@ def create_optimizer(
     )
 
 
+def _scheduler_config(training_cfg: dict[str, Any]) -> dict[str, Any]:
+    scheduler_cfg = training_cfg.get("scheduler")
+    if scheduler_cfg is None:
+        return {"enabled": False, "type": "none"}
+    if isinstance(scheduler_cfg, str):
+        return {"enabled": scheduler_cfg.lower() not in {"none", "constant", "off"}, "type": scheduler_cfg}
+    if not isinstance(scheduler_cfg, dict):
+        raise TypeError("training.scheduler must be a string, mapping, or omitted")
+    return scheduler_cfg
+
+
+def create_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    training_cfg: dict[str, Any],
+    total_steps: int,
+) -> torch.optim.lr_scheduler.LambdaLR | None:
+    scheduler_cfg = _scheduler_config(training_cfg)
+    scheduler_type = str(scheduler_cfg.get("type", scheduler_cfg.get("preset", "none"))).lower()
+    enabled = bool(scheduler_cfg.get("enabled", scheduler_type not in {"none", "constant", "off"}))
+    if not enabled or scheduler_type in {"none", "constant", "off"}:
+        return None
+    if scheduler_type not in {"cosine", "cosine_warmup", "warmup_cosine"}:
+        raise ValueError("training.scheduler.type must be one of: none, constant, cosine")
+
+    base_lr = float(training_cfg["lr"])
+    min_lr = float(scheduler_cfg.get("min_lr", 0.0))
+    min_lr_ratio = float(scheduler_cfg.get("min_lr_ratio", min_lr / base_lr if base_lr > 0.0 else 0.0))
+    warmup_steps = int(scheduler_cfg.get("warmup_steps", 0))
+    total_steps = int(scheduler_cfg.get("total_steps", total_steps))
+
+    if total_steps < 1:
+        raise ValueError("scheduler total_steps must be positive")
+    if warmup_steps < 0:
+        raise ValueError("scheduler warmup_steps must be non-negative")
+    if not 0.0 <= min_lr_ratio <= 1.0:
+        raise ValueError("scheduler min_lr_ratio must be in [0, 1]")
+
+    def lr_lambda(step: int) -> float:
+        if warmup_steps > 0 and step < warmup_steps:
+            return max(1.0 / warmup_steps, float(step + 1) / float(warmup_steps))
+        if total_steps <= warmup_steps:
+            return 1.0
+        progress = min(1.0, max(0.0, float(step - warmup_steps) / float(total_steps - warmup_steps)))
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+
+def _time_sampling_config(training_cfg: dict[str, Any] | None) -> dict[str, Any]:
+    if training_cfg is None:
+        return {"distribution": "uniform"}
+    time_cfg = training_cfg.get("time_sampling", "uniform")
+    if isinstance(time_cfg, str):
+        return {"distribution": time_cfg}
+    if not isinstance(time_cfg, dict):
+        raise TypeError("training.time_sampling must be a string, mapping, or omitted")
+    return time_cfg
+
+
+def sample_timesteps(
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    training_cfg: dict[str, Any] | None = None,
+) -> torch.Tensor:
+    time_cfg = _time_sampling_config(training_cfg)
+    distribution = str(time_cfg.get("distribution", time_cfg.get("type", "uniform"))).lower()
+    if distribution == "uniform":
+        return torch.rand(batch_size, device=device, dtype=dtype)
+    if distribution == "beta":
+        alpha = float(time_cfg.get("alpha", time_cfg.get("beta_alpha", 2.0)))
+        beta = float(time_cfg.get("beta", time_cfg.get("beta_beta", 1.0)))
+        if alpha <= 0.0 or beta <= 0.0:
+            raise ValueError("beta time sampling requires alpha > 0 and beta > 0")
+        sample_device = torch.device("cpu") if device.type == "mps" else device
+        alpha_tensor = torch.tensor(alpha, device=sample_device, dtype=torch.float32)
+        beta_tensor = torch.tensor(beta, device=sample_device, dtype=torch.float32)
+        return torch.distributions.Beta(alpha_tensor, beta_tensor).sample((batch_size,)).to(
+            device=device,
+            dtype=dtype,
+        )
+    raise ValueError("training.time_sampling.distribution must be one of: uniform, beta")
+
+
 def flow_matching_loss(
     model: TimeConditionedUNet,
     real_images: torch.Tensor,
+    training_cfg: dict[str, Any] | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     batch_size = real_images.size(0)
     x0 = torch.randn_like(real_images)
-    t = torch.rand(batch_size, device=real_images.device, dtype=real_images.dtype)
+    t = sample_timesteps(
+        batch_size,
+        real_images.device,
+        real_images.dtype,
+        training_cfg,
+    )
     t_view = t.view(batch_size, 1, 1, 1)
     x_t = (1.0 - t_view) * x0 + t_view * real_images
     target_velocity = real_images - x0
@@ -180,35 +271,58 @@ def save_flow_matching_checkpoint(
     path: str | Path,
     model: TimeConditionedUNet,
     optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LambdaLR | None,
     epoch: int,
     step: int,
     config: dict[str, Any],
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "epoch": epoch,
-            "step": step,
-            "config": config,
-        },
-        path,
-    )
+    checkpoint: dict[str, Any] = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "epoch": epoch,
+        "step": step,
+        "config": config,
+    }
+    if scheduler is not None:
+        checkpoint["scheduler"] = scheduler.state_dict()
+    torch.save(checkpoint, path)
+
+
+def align_scheduler_to_step(
+    scheduler: torch.optim.lr_scheduler.LambdaLR,
+    step: int,
+) -> None:
+    if step <= 0:
+        return
+    scheduler.last_epoch = int(step)
+    lrs = [
+        base_lr * lr_lambda(scheduler.last_epoch)
+        for lr_lambda, base_lr in zip(scheduler.lr_lambdas, scheduler.base_lrs)
+    ]
+    for param_group, lr in zip(scheduler.optimizer.param_groups, lrs):
+        param_group["lr"] = lr
+    scheduler._last_lr = lrs
 
 
 def load_flow_matching_checkpoint(
     path: str | Path,
     model: TimeConditionedUNet,
     optimizer: torch.optim.Optimizer | None = None,
+    scheduler: torch.optim.lr_scheduler.LambdaLR | None = None,
     map_location: str | torch.device = "cpu",
 ) -> tuple[int, int]:
     checkpoint = torch.load(Path(path), map_location=map_location)
     model.load_state_dict(checkpoint["model"])
     if optimizer is not None and "optimizer" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer"])
-    return int(checkpoint.get("epoch", 0)), int(checkpoint.get("step", 0))
+    if scheduler is not None and "scheduler" in checkpoint:
+        scheduler.load_state_dict(checkpoint["scheduler"])
+    step = int(checkpoint.get("step", 0))
+    if scheduler is not None and "scheduler" not in checkpoint:
+        align_scheduler_to_step(scheduler, step)
+    return int(checkpoint.get("epoch", 0)), step
 
 
 def train(
@@ -247,6 +361,8 @@ def train(
     model = create_model(config).to(device)
     model.apply(weights_init)
     optimizer = create_optimizer(model, training_cfg)
+    total_steps = int(training_cfg["num_epochs"]) * max(1, len(dataloader))
+    scheduler = create_lr_scheduler(optimizer, training_cfg, total_steps)
 
     start_epoch = 0
     global_step = 0
@@ -255,6 +371,7 @@ def train(
             resume,
             model,
             optimizer,
+            scheduler,
             map_location=device,
         )
         start_epoch += 1
@@ -283,11 +400,13 @@ def train(
         progress = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{training_cfg['num_epochs']}")
         for real_images in progress:
             real_images = real_images.to(device)
-            loss, metrics = flow_matching_loss(model, real_images)
+            loss, metrics = flow_matching_loss(model, real_images, training_cfg)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
 
             global_step += 1
             batches_this_run += 1
@@ -325,6 +444,7 @@ def train(
                 checkpoint_dir / f"flow_matching_epoch_{epoch + 1:04d}.pt",
                 model,
                 optimizer,
+                scheduler,
                 epoch,
                 global_step,
                 config,
@@ -347,6 +467,7 @@ def train(
         checkpoint_dir / "flow_matching_latest.pt",
         model,
         optimizer,
+        scheduler,
         max(0, last_epoch),
         global_step,
         config,

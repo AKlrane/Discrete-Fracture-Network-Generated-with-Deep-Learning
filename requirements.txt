@@ -8,3 +8,6 @@ tqdm
 matplotlib
 lightning
 emcee
+scipy
+scikit-image
+networkx

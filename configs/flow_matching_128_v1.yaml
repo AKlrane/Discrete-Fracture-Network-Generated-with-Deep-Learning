@@ -24,6 +24,15 @@ training:
   seed: 42
   device: auto
   precision: bf16-mixed
+  time_sampling:
+    distribution: uniform
+    beta_alpha: 2.0
+    beta_beta: 1.0
+  scheduler:
+    enabled: false
+    type: cosine
+    warmup_steps: 5000
+    min_lr: 0.000001
 
 sampler:
   solver: euler
