@@ -25,6 +25,10 @@ outputs/**/lightning/*.yaml
 outputs/**/*_curves.png
 data/synthetic_dfn_128/images/*.png
 data/synthetic_dfn_128/metadata/*.json
+data/synthetic_dfn_teng_*/images/*.png
+data/synthetic_dfn_teng_*/metadata/*.json
+outputs/evaluation/
+outputs/videos/
 
 .DS_Store
 **/*.png

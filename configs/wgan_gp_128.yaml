@@ -1,5 +1,5 @@
 data:
-  image_dir: data/synthetic_dfn_128/images
+  image_dir: data/synthetic_dfn_teng_50_128/images
   image_size: 128
 
 model:
