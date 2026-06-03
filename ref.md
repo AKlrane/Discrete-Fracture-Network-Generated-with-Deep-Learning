@@ -256,7 +256,7 @@ num_epochs = 200
 ### 关键差距
 
 - 数据生成：当前 `src/generate_synthetic_dfn.py` 已加入轻量分形位置采样、可控截断幂律长度和可设置均值/集中度的 von Mises 方向；但它仍是图像线段生成器，不是论文完整 MPP 框架。
-- 条件约束：当前生成器已支持 `preexisting_connectivity` 条件模式，可以在训练样本中强制加入 injection/monitoring 预设裂隙、筛选满足连通性的样本，并移除与预设裂隙网络不连通的孤立随机裂隙；但还没有复现论文 Table 1 的全部五个具体几何案例。
+- 条件约束：当前生成器已支持 `preexisting_connectivity` 条件模式，会先按 `preexisting_count` 随机生成一组 dataset-level pre-existing fractures，指定其中一条为 injection、其余为 monitoring，再把这组预设裂隙注入每个训练样本，筛选满足 injection-monitoring 连通性的样本，并移除/剪枝不需要的随机裂隙；`configs/dataset/teng_conditioned_case*_128.yaml` 已按论文五个条件 case 记录 `preexisting_count/lmin/lmax/a` 和表中 `p`、intersection number、connected fracture number 统计。
 - 模型结构：当前 `src/models/wgan_gp.py` 是 DCGAN 风格的 ConvTranspose/Conv 网络；论文使用 ResNet 上采样/下采样 block。
 - latent 维度：当前默认 `latent_dim = 128`；论文强调测试极低维 latent space，如 `2/4/8/16/32/64`，并用低维性服务于反演。
 - 验证方法：当前 `src/evaluation/evaluate_dfn.py` 用图像级指标和 Hough 方向直方图；论文使用 EDSR + PHT 提取线段，并进一步拟合 `Dc`、幂律长度参数 `a`、von Mises 参数 `mu/kappa`。

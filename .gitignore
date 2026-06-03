@@ -27,3 +27,6 @@ data/synthetic_dfn_128/images/*.png
 data/synthetic_dfn_128/metadata/*.json
 
 .DS_Store
+**/*.png
+**/*.json
+data/synthetic_dfn_teng_50_128_old/metadata/*.json

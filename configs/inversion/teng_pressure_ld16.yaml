@@ -1,0 +1,78 @@
+prior:
+  checkpoint: outputs/wgan_gp_teng_conditioned_case1_ld16/checkpoints/wgan_gp_latest.pt
+  latent_dim: 16
+  base_channels: 64
+  image_size: 128
+  threshold: 0.0
+  device: auto
+
+geometry:
+  domain_width: 20.0
+  domain_height: 20.0
+  extraction:
+    hough_threshold: 12
+    min_line_length: 6
+    max_line_gap: 3
+    invert_y: true
+
+wells:
+  injection:
+    x: 2.0
+    y: 10.0
+    pressure: 1.0
+  production:
+    x: 18.0
+    y: 10.0
+    pressure: 0.0
+
+observations:
+  pressure_csv: data/inversion/teng_pressure_ld16/observations.csv
+  noise_sigma: 0.05
+  grid:
+    nx: 7
+    ny: 7
+    x_min: 2.0
+    x_max: 18.0
+    y_min: 2.0
+    y_max: 18.0
+
+posterior:
+  prior_scale: 1.0
+  failure_log_prob: -1.0e100
+
+forward:
+  backend: mock
+  mock:
+    fracture_influence: 0.18
+    decay_length: 1.5
+    min_pressure: -5.0
+    max_pressure: 5.0
+  geos:
+    executable: ""
+    template_dir: ""
+    work_dir: outputs/inversion/teng_pressure_ld16/geos_runs
+    output_pressure_csv: pressure_observations.csv
+    timeout_seconds: 600
+    arguments:
+      - "{run_dir}"
+
+synthetic_reference:
+  seed: 123
+  z_scale: 1.0
+
+sampler:
+  backend: emcee
+  seed: 42
+  num_steps: 200
+  burn_in: 50
+  init_scale: 1.0
+  num_walkers: 64
+  progress: false
+  dream_zs:
+    num_chains: 32
+    crossover_probability: 0.9
+    noise_scale: 1.0e-6
+    gamma_scale: 1.0
+
+outputs:
+  out_dir: outputs/inversion/teng_pressure_ld16

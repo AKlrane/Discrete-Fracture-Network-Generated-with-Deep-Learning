@@ -35,9 +35,15 @@ DEFAULT_OPTIONS: dict[str, Any] = {
     "domain_width": 20.0,
     "domain_height": 20.0,
     "conditioning_mode": "none",
-    "preexisting_fractures": [],
+    "preexisting_count": None,
+    "preexisting_injection_index": 0,
     "remove_isolated_fractures": True,
     "max_attempts": None,
+    "prune_connected_fractures_to_target": False,
+    "target_connected_fracture_count_min": None,
+    "target_connected_fracture_count_max": None,
+    "paper_case": None,
+    "reference_stats": None,
 }
 
 
@@ -89,15 +95,35 @@ def options_from_config(config: dict[str, Any]) -> dict[str, Any]:
     conditioning = config.get("conditioning", {})
     if isinstance(conditioning, dict):
         options["conditioning_mode"] = conditioning.get("mode", options["conditioning_mode"])
-        options["preexisting_fractures"] = conditioning.get(
-            "preexisting_fractures",
-            options["preexisting_fractures"],
+        options["preexisting_count"] = conditioning.get("preexisting_count", options["preexisting_count"])
+        options["preexisting_injection_index"] = conditioning.get(
+            "injection_index",
+            options["preexisting_injection_index"],
         )
         options["remove_isolated_fractures"] = conditioning.get(
             "remove_isolated_fractures",
             options["remove_isolated_fractures"],
         )
         options["max_attempts"] = conditioning.get("max_attempts", options["max_attempts"])
+        options["prune_connected_fractures_to_target"] = conditioning.get(
+            "prune_connected_fractures_to_target",
+            options["prune_connected_fractures_to_target"],
+        )
+        fracture_count_target = conditioning.get("target_connected_fracture_count", {})
+        if isinstance(fracture_count_target, dict):
+            options["target_connected_fracture_count_min"] = fracture_count_target.get(
+                "min",
+                options["target_connected_fracture_count_min"],
+            )
+            options["target_connected_fracture_count_max"] = fracture_count_target.get(
+                "max",
+                options["target_connected_fracture_count_max"],
+            )
+
+    if "paper_case" in config:
+        options["paper_case"] = config["paper_case"]
+    if "reference_stats" in config:
+        options["reference_stats"] = config["reference_stats"]
 
     return options
 
@@ -328,6 +354,61 @@ def make_random_fractures(
     return fractures
 
 
+def assign_preexisting_roles(
+    fractures: list[dict[str, Any]],
+    injection_index: int,
+) -> list[dict[str, Any]]:
+    if len(fractures) < 2:
+        raise ValueError("conditioning.preexisting_count must be at least 2")
+    if not 0 <= injection_index < len(fractures):
+        raise ValueError("conditioning.injection_index must point to an existing pre-existing fracture")
+
+    assigned = []
+    for index, fracture in enumerate(fractures):
+        role = "injection" if index == injection_index else "monitoring"
+        assigned_fracture = dict(fracture)
+        assigned_fracture["id"] = f"{role}_{index}"
+        assigned_fracture["role"] = role
+        assigned_fracture["source"] = "sampled_preexisting"
+        assigned.append(assigned_fracture)
+    return assigned
+
+
+def sample_preexisting_fractures(
+    rng: np.random.Generator,
+    args: argparse.Namespace,
+    min_length: float,
+    max_length: float,
+) -> list[dict[str, Any]]:
+    if args.preexisting_count is None:
+        raise ValueError("conditioning.preexisting_count is required for preexisting_connectivity mode")
+
+    preexisting_count = int(args.preexisting_count)
+    candidate_fractures = make_random_fractures(
+        image_size=args.image_size,
+        rng=rng,
+        min_fractures=preexisting_count,
+        max_fractures=preexisting_count,
+        min_length=min_length,
+        max_length=max_length,
+        min_width=args.min_width,
+        max_width=args.max_width,
+        position_distribution=args.position_distribution,
+        fractal_dimension=args.fractal_dimension,
+        fractal_levels=args.fractal_levels,
+        randomize_cascade_orientation=not args.fixed_cascade_orientation,
+        length_distribution=args.length_distribution,
+        power_law_exponent=args.power_law_exponent,
+        orientation=args.orientation,
+        von_mises_mean_degrees=args.von_mises_mean_degrees,
+        von_mises_kappa=args.von_mises_kappa,
+    )
+    return assign_preexisting_roles(
+        candidate_fractures,
+        injection_index=int(args.preexisting_injection_index),
+    )
+
+
 def dataset_metadata(
     sample_id: int,
     image_size: int,
@@ -354,6 +435,8 @@ def dataset_metadata(
         "domain_width": args.domain_width if args.unit_system == "physical" else None,
         "domain_height": args.domain_height if args.unit_system == "physical" else None,
         "conditioning_mode": args.conditioning_mode,
+        "paper_case": args.paper_case,
+        "reference_stats": args.reference_stats,
         "fractures": fractures,
     }
 
@@ -402,47 +485,6 @@ def make_dfn_sample(
     image = draw_fractures(fractures, image_size)
     metadata = dataset_metadata(sample_id, image_size, fractures, args, min_length, max_length)
     return image, metadata
-
-
-def parse_preexisting_fractures(args: argparse.Namespace) -> list[dict[str, Any]]:
-    fractures = []
-    for index, fracture in enumerate(args.preexisting_fractures):
-        if not isinstance(fracture, dict):
-            raise ValueError("conditioning.preexisting_fractures entries must be mappings")
-
-        role = str(fracture.get("role", "injection" if index == 0 else "monitoring"))
-        if role not in {"injection", "monitoring"}:
-            raise ValueError("preexisting fracture role must be 'injection' or 'monitoring'")
-        if "angle" in fracture:
-            angle = float(fracture["angle"])
-        else:
-            angle = float(np.deg2rad(float(fracture.get("angle_degrees", 0.0))))
-
-        center_x = float(fracture["center_x"]) * x_scale(args)
-        center_y = float(fracture["center_y"]) * y_scale(args)
-        length = float(fracture["length"]) * length_scale(args)
-        width = int(fracture.get("width", args.max_width))
-        fractures.append(
-            {
-                "id": str(fracture.get("id", f"preexisting_{index:02d}")),
-                "role": role,
-                "center_x": center_x,
-                "center_y": center_y,
-                "length": length,
-                "angle": angle % np.pi,
-                "angle_degrees": float(np.rad2deg(angle % np.pi)),
-                "width": width,
-                "source": "preexisting",
-            }
-        )
-
-    injection_count = sum(fracture["role"] == "injection" for fracture in fractures)
-    monitoring_count = sum(fracture["role"] == "monitoring" for fracture in fractures)
-    if injection_count != 1:
-        raise ValueError("preexisting connectivity conditioning requires exactly one injection fracture")
-    if monitoring_count < 1:
-        raise ValueError("preexisting connectivity conditioning requires at least one monitoring fracture")
-    return fractures
 
 
 def fracture_component_labels(labels: np.ndarray, fracture: dict[str, Any], image_size: int) -> set[int]:
@@ -503,6 +545,34 @@ def remove_isolated_random_fractures(
     return retained_random
 
 
+def prune_random_fractures_to_target_count(
+    random_fractures: list[dict[str, Any]],
+    preexisting_fractures: list[dict[str, Any]],
+    image_size: int,
+    target_max_count: int | None,
+) -> list[dict[str, Any]]:
+    if target_max_count is None:
+        return random_fractures
+
+    pruned = list(random_fractures)
+    while len(pruned) + len(preexisting_fractures) > target_max_count:
+        removed = False
+        for index in range(len(pruned) - 1, -1, -1):
+            candidate = pruned[:index] + pruned[index + 1 :]
+            connected, _, _ = connectivity_status(
+                [*candidate, *preexisting_fractures],
+                preexisting_fractures,
+                image_size,
+            )
+            if connected:
+                pruned = candidate
+                removed = True
+                break
+        if not removed:
+            break
+    return pruned
+
+
 def make_conditioned_dfn_sample(
     sample_id: int,
     attempt: int,
@@ -545,7 +615,25 @@ def make_conditioned_dfn_sample(
             labels,
             image_size,
         )
+    if args.prune_connected_fractures_to_target:
+        retained_random = prune_random_fractures_to_target_count(
+            retained_random,
+            preexisting_fractures,
+            image_size,
+            args.target_connected_fracture_count_max,
+        )
     final_fractures = [*retained_random, *preexisting_fractures]
+    if (
+        args.target_connected_fracture_count_min is not None
+        and len(final_fractures) < args.target_connected_fracture_count_min
+    ):
+        return None
+    if (
+        args.target_connected_fracture_count_max is not None
+        and len(final_fractures) > args.target_connected_fracture_count_max
+    ):
+        return None
+
     image = draw_fractures(final_fractures, image_size)
     metadata = dataset_metadata(sample_id, image_size, final_fractures, args, min_length, max_length)
     metadata["conditioning"] = {
@@ -554,7 +642,12 @@ def make_conditioned_dfn_sample(
         "initial_random_fractures": len(random_fractures),
         "retained_random_fractures": len(retained_random),
         "num_preexisting_fractures": len(preexisting_fractures),
+        "preexisting_source": "sampled_dataset",
+        "preexisting_injection_index": args.preexisting_injection_index,
         "remove_isolated_fractures": args.remove_isolated_fractures,
+        "prune_connected_fractures_to_target": args.prune_connected_fractures_to_target,
+        "target_connected_fracture_count_min": args.target_connected_fracture_count_min,
+        "target_connected_fracture_count_max": args.target_connected_fracture_count_max,
         "connectivity": connectivity,
     }
     return image, metadata
@@ -572,7 +665,12 @@ def generate_dataset(args: argparse.Namespace) -> None:
     max_length = scale_length_arg(args.max_length, args) or args.image_size * 0.65
 
     if args.conditioning_mode == "preexisting_connectivity":
-        preexisting_fractures = parse_preexisting_fractures(args)
+        preexisting_fractures = sample_preexisting_fractures(
+            rng,
+            args,
+            min_length=min_length,
+            max_length=max_length,
+        )
         max_attempts = args.max_attempts or max(args.num_samples * 1000, 1000)
         sample_id = 0
         attempt = 0
@@ -680,7 +778,35 @@ def parse_args() -> argparse.Namespace:
         choices=("none", "preexisting_connectivity"),
         default=defaults["conditioning_mode"],
     )
+    parser.add_argument("--preexisting_count", type=int, default=defaults["preexisting_count"])
+    parser.add_argument(
+        "--preexisting_injection_index",
+        type=int,
+        default=defaults["preexisting_injection_index"],
+    )
     parser.add_argument("--max_attempts", type=int, default=defaults["max_attempts"])
+    parser.set_defaults(prune_connected_fractures_to_target=bool(defaults["prune_connected_fractures_to_target"]))
+    pruning_group = parser.add_mutually_exclusive_group()
+    pruning_group.add_argument(
+        "--prune_connected_fractures_to_target",
+        dest="prune_connected_fractures_to_target",
+        action="store_true",
+    )
+    pruning_group.add_argument(
+        "--no_prune_connected_fractures_to_target",
+        dest="prune_connected_fractures_to_target",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--target_connected_fracture_count_min",
+        type=int,
+        default=defaults["target_connected_fracture_count_min"],
+    )
+    parser.add_argument(
+        "--target_connected_fracture_count_max",
+        type=int,
+        default=defaults["target_connected_fracture_count_max"],
+    )
     parser.set_defaults(remove_isolated_fractures=bool(defaults["remove_isolated_fractures"]))
     isolation_group = parser.add_mutually_exclusive_group()
     isolation_group.add_argument(
@@ -694,7 +820,8 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
     )
     args = parser.parse_args()
-    args.preexisting_fractures = defaults["preexisting_fractures"]
+    args.paper_case = defaults["paper_case"]
+    args.reference_stats = defaults["reference_stats"]
     return args
 
 

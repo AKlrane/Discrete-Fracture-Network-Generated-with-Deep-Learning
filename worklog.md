@@ -249,14 +249,17 @@ sample mean ~= 9.2335
 
 ### 新增配置入口
 
-新增 `configs/dataset/` 子目录，并提供两份论文式条件样本配置：
+新增 `configs/dataset/` 子目录，并把论文条件 DFN 表中的五个 case 写成独立配置：
 
 ```text
-configs/dataset/teng_conditioned_lmin5_128.yaml
-configs/dataset/teng_conditioned_lmin10_128.yaml
+configs/dataset/teng_conditioned_case1_128.yaml
+configs/dataset/teng_conditioned_case2_128.yaml
+configs/dataset/teng_conditioned_case3_128.yaml
+configs/dataset/teng_conditioned_case4_128.yaml
+configs/dataset/teng_conditioned_case5_128.yaml
 ```
 
-两份配置都使用：
+五份配置都使用：
 
 ```text
 unit_system = physical
@@ -272,7 +275,19 @@ von_mises_kappa = 5
 conditioning.mode = preexisting_connectivity
 ```
 
-区别是 `length.min` 分别为 `5.0 m` 和 `10.0 m`。当前示例配置包含 1 条 `injection` 预设裂隙和 2 条 `monitoring` 预设裂隙；要复现论文中 2 到 4 条预设裂隙的不同 case，可以在 YAML 的 `conditioning.preexisting_fractures` 列表中增删条目。
+五个 case 的论文参数为：
+
+| Config | Pre-existing fractures | `lmin` | `lmax` | `a` |
+| --- | ---: | ---: | ---: | ---: |
+| `teng_conditioned_case1_128.yaml` | 2 | 5 m | 20 m | 2 |
+| `teng_conditioned_case2_128.yaml` | 2 | 10 m | 20 m | 2 |
+| `teng_conditioned_case3_128.yaml` | 3 | 5 m | 20 m | 2 |
+| `teng_conditioned_case4_128.yaml` | 3 | 10 m | 20 m | 2 |
+| `teng_conditioned_case5_128.yaml` | 4 | 10 m | 20 m | 2 |
+
+每个配置都包含 `paper_case` 字段记录 `preexisting_count/lmin/lmax/a`，并在 `reference_stats` 中保存论文表里的 `p`、intersection number 和 connected fracture number 统计。当前 `reference_stats.columns` 使用 `ld_2/ld_4/ld_8/ld_16` 表示表中四个 latent dimension 结果。
+
+条件 case 不再在 YAML 中显式给出 pre-existing fractures 的坐标。生成器会在每个 dataset 开始时按 `preexisting_count` 先随机生成一组 pre-existing candidate fractures，再按 `injection_index` 指定其中一条为 injection fracture，其余为 monitoring fractures。这组 pre-existing fractures 在同一个 dataset 的所有 training samples 中保持固定。
 
 ### 新增生成器行为
 
@@ -280,17 +295,17 @@ conditioning.mode = preexisting_connectivity
 
 ```bash
 /opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py \
-  --config configs/dataset/teng_conditioned_lmin5_128.yaml
+  --config configs/dataset/teng_conditioned_case1_128.yaml
 ```
 
 配置文件作为默认参数来源，命令行参数仍可覆盖常用字段。例如 smoke test 可以覆盖样本数和输出目录：
 
 ```bash
 /opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py \
-  --config configs/dataset/teng_conditioned_lmin5_128.yaml \
+  --config configs/dataset/teng_conditioned_case1_128.yaml \
   --num_samples 3 \
-  --out_dir /tmp/gendl_dfn_conditioned_lmin5 \
-  --max_attempts 5000
+  --out_dir /tmp/teng_conditioned_case1_128 \
+  --max_attempts 10000
 ```
 
 条件样本 metadata 会额外记录：
@@ -301,9 +316,18 @@ conditioning.attempt
 conditioning.initial_random_fractures
 conditioning.retained_random_fractures
 conditioning.num_preexisting_fractures
+conditioning.preexisting_source
+conditioning.preexisting_injection_index
 conditioning.remove_isolated_fractures
+conditioning.prune_connected_fractures_to_target
+conditioning.target_connected_fracture_count_min
+conditioning.target_connected_fracture_count_max
 conditioning.connectivity
+paper_case
+reference_stats
 ```
+
+为了避免最终训练样本仍然保留过多随机裂隙，生成器新增 `conditioning.target_connected_fracture_count` 和 `conditioning.prune_connected_fractures_to_target`。逻辑是：先随机生成 dataset-level pre-existing candidate fractures 并指定 injection/monitoring；随后每个 training sample 随机生成普通裂隙并注入同一组 pre-existing fractures；再筛选满足 injection-monitoring 连通的样本、移除孤立随机裂隙；最后贪心删除不会破坏 injection-monitoring 连通的多余随机裂隙，使最终 connected fracture number 落入配置范围。这个范围由论文表中 connected fracture number 的均值和方差粗略设定。
 
 ### 验证记录
 
@@ -311,15 +335,26 @@ conditioning.connectivity
 
 ```text
 /opt/anaconda3/bin/conda run -n dfn python -m py_compile src/generate_synthetic_dfn.py
-/opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py --config configs/dataset/teng_conditioned_lmin5_128.yaml --num_samples 3 --out_dir /tmp/gendl_dfn_conditioned_lmin5 --max_attempts 5000
-/opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py --config configs/dataset/teng_conditioned_lmin10_128.yaml --num_samples 3 --out_dir /tmp/gendl_dfn_conditioned_lmin10 --max_attempts 5000
+/opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py --config configs/dataset/teng_conditioned_case1_128.yaml --num_samples 3 --out_dir /tmp/teng_candidate_case1_128 --max_attempts 50000
+/opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py --config configs/dataset/teng_conditioned_case2_128.yaml --num_samples 3 --out_dir /tmp/teng_candidate_case2_128 --max_attempts 50000
+/opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py --config configs/dataset/teng_conditioned_case3_128.yaml --num_samples 3 --out_dir /tmp/teng_candidate_case3_128 --max_attempts 50000
+/opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py --config configs/dataset/teng_conditioned_case4_128.yaml --num_samples 3 --out_dir /tmp/teng_candidate_case4_128 --max_attempts 50000
+/opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py --config configs/dataset/teng_conditioned_case5_128.yaml --num_samples 3 --out_dir /tmp/teng_candidate_case5_128 --max_attempts 50000
 /opt/anaconda3/bin/conda run -n dfn python src/generate_synthetic_dfn.py --num_samples 2 --image_size 64 --out_dir /tmp/gendl_dfn_default_after_conditioning --seed 7
 ```
 
-检查到 `lmin=5 m` smoke metadata 中，第一张样本满足两个 monitoring fractures 均连接 injection fracture，且孤立过滤后 `initial_random_fractures = 50`、`retained_random_fractures = 49`、最终 `num_fractures = 52`。
+五个 case 的 smoke metadata 均满足所有 monitoring fractures 连接 injection fracture，pre-existing fractures 的 `source` 均为 `sampled_preexisting`，同一个 case 的三个样本共享同一组 pre-existing fractures，且最终 `num_fractures` 落在配置的 `target_connected_fracture_count` 范围内。小样本检查结果为：
+
+```text
+case1 counts [5, 5, 5], target [2, 5]
+case2 counts [4, 4, 4], target [2, 4]
+case3 counts [7, 7, 7], target [3, 7]
+case4 counts [5, 5, 5], target [3, 5]
+case5 counts [6, 6, 6], target [4, 6]
+```
 
 ### 当前注意事项
 
-- 这里复现的是论文条件训练样本的生成逻辑，不是 WGAN-GP 训练后的 12,800 生成样本分析。
-- 当前预设裂隙几何是可运行示例，不是论文 Table 1 的逐 case 坐标复刻；如果拿到 Table 1 的完整坐标，应直接写入 YAML。
+- 这里复现的是论文条件训练样本的生成逻辑和五个 case 的参数/统计记录，不是 WGAN-GP 训练后的 12,800 生成样本分析。
+- 当前实现按配置随机生成 pre-existing candidate fractures，而不是在 YAML 中手写固定坐标。
 - 条件连通通过图像 8 连通域检查实现，适合当前 binary PNG 训练数据；如果后续改为矢量线段级评估，应补充几何图算法版本。

@@ -1,0 +1,27 @@
+data:
+  image_dir: data/synthetic_dfn_teng_conditioned_case1_128/images
+  image_size: 128
+
+model:
+  latent_dim: 16
+  base_channels: 64
+
+training:
+  batch_size: 64
+  num_epochs: 200
+  lr: 0.0001
+  beta1: 0.0
+  beta2: 0.9
+  critic_steps: 5
+  lambda_gp: 10.0
+  sample_interval: 500
+  checkpoint_interval: 50
+  num_sample_images: 64
+  seed: 42
+  device: auto
+  precision: bf16-mixed
+
+outputs:
+  sample_dir: outputs/wgan_gp_teng_conditioned_case1_ld16/samples
+  checkpoint_dir: outputs/wgan_gp_teng_conditioned_case1_ld16/checkpoints
+  log_dir: outputs/wgan_gp_teng_conditioned_case1_ld16/logs

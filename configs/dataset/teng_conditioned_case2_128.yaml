@@ -1,0 +1,85 @@
+paper_case:
+  id: 2
+  description: Two pre-existing fractures, lmin = 10 m, lmax = 20 m, a = 2.
+  preexisting_count: 2
+  lmin: 10.0
+  lmax: 20.0
+  power_law_exponent: 2.0
+
+dataset:
+  num_samples: 30000
+  image_size: 128
+  seed: 42
+
+output:
+  out_dir: data/synthetic_dfn_teng_conditioned_case2_128
+
+units:
+  system: physical
+  domain_width: 20.0
+  domain_height: 20.0
+
+fractures:
+  min_fractures: 2
+  max_fractures: 6
+  min_width: 1
+  max_width: 1
+
+position:
+  distribution: fractal
+  fractal_dimension: 2.0
+  fractal_levels: 6
+  fixed_cascade_orientation: false
+
+length:
+  distribution: power_law
+  min: 10.0
+  max: 20.0
+  power_law_exponent: 2.0
+
+orientation:
+  distribution: von_mises
+  von_mises_mean_degrees: -30.0
+  von_mises_kappa: 5.0
+
+conditioning:
+  mode: preexisting_connectivity
+  preexisting_count: 2
+  injection_index: 0
+  max_attempts: 2000000
+  remove_isolated_fractures: true
+  prune_connected_fractures_to_target: true
+  target_connected_fracture_count:
+    min: 2
+    max: 4
+
+reference_stats:
+  source: Teng et al. (2025) conditional DFN table.
+  columns: [ld_2, ld_4, ld_8, ld_16]
+  connectivity_probability:
+    ld_2: 0.94
+    ld_4: 0.87
+    ld_8: 0.90
+    ld_16: 0.88
+  intersection_number:
+    mean:
+      ld_2: 3.74
+      ld_4: 3.60
+      ld_8: 3.70
+      ld_16: 3.66
+    variance:
+      ld_2: 3.01
+      ld_4: 2.80
+      ld_8: 3.05
+      ld_16: 2.74
+  connected_fracture_number:
+    mean:
+      ld_2: 2.20
+      ld_4: 2.18
+      ld_8: 2.20
+      ld_16: 2.20
+    variance:
+      ld_2: 1.16
+      ld_4: 1.34
+      ld_8: 1.34
+      ld_16: 1.18
