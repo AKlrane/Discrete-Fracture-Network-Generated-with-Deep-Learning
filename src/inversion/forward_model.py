@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from .common import format_command_arg, read_point, resolve_path
+from .common import format_command_arg, read_point, resolve_path, write_json
 from .fracture_extract import (
     FractureSegment,
     extract_fracture_segments,
@@ -119,6 +119,9 @@ class GEOSForwardModel:
         self.domain_height = float(config.get("geometry", {}).get("domain_height", 20.0))
         self.extraction_cfg = config.get("geometry", {}).get("extraction", {})
         self.geos_cfg = config.get("forward", {}).get("geos", {})
+        self.wells_cfg = config.get("wells", {})
+        self.runtime_cfg = self.geos_cfg.get("runtime", {})
+        self.material_cfg = self.geos_cfg.get("material", {})
         executable = str(self.geos_cfg.get("executable", "")).strip()
         if not executable:
             raise ForwardModelError("forward.geos.executable is required for backend=geos")
@@ -162,6 +165,15 @@ class GEOSForwardModel:
             )
         return pressures
 
+    def _write_observation_points(self, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["x", "y"])
+            writer.writeheader()
+            for point in self.observation_points:
+                writer.writerow({"x": float(point[0]), "y": float(point[1])})
+        return path
+
     def simulate(self, z: np.ndarray) -> SimulationResult:
         generated = self.prior.generate_one(z)
         segments = self._extract(generated.binary)
@@ -174,12 +186,26 @@ class GEOSForwardModel:
             shutil.copytree(template_dir, run_dir, dirs_exist_ok=True)
 
         segments_csv = write_segments_csv(run_dir / "dfn_segments.csv", segments)
+        observation_points_csv = self._write_observation_points(run_dir / "observation_points.csv")
+        write_json(
+            run_dir / "geos_request.json",
+            {
+                "domain_width": self.domain_width,
+                "domain_height": self.domain_height,
+                "wells": self.wells_cfg,
+                "runtime": self.runtime_cfg,
+                "material": self.material_cfg,
+                "output_pressure_csv": self.output_pressure_csv,
+            },
+        )
         save_binary_image(generated.binary, run_dir / "dfn_binary.png")
         save_probability_image(generated.probability, run_dir / "dfn_probability.png")
 
         replacements = {
+            "project_root": str(resolve_path(".")),
             "run_dir": str(run_dir),
             "segments_csv": str(segments_csv),
+            "observation_points_csv": str(observation_points_csv),
             "output_pressure_csv": str(run_dir / self.output_pressure_csv),
         }
         command = [str(self.executable)]
@@ -224,3 +250,4 @@ def create_forward_model(
     if backend == "geos":
         return GEOSForwardModel(prior, observation_points, config)
     raise ValueError("forward.backend must be one of: mock, geos")
+

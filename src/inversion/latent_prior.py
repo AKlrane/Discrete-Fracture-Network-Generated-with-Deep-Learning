@@ -88,10 +88,10 @@ class WGANLatentPrior:
 
     def generate(self, z: np.ndarray | torch.Tensor) -> GeneratedDFN:
         images = self.generate_tanh(z)
-        tanh = images.numpy()
+        tanh = np.asarray(images.tolist(), dtype=np.float32)
         probability = np.clip((tanh + 1.0) / 2.0, 0.0, 1.0)
         binary = (tanh > self.threshold).astype(np.uint8)
-        z_array = self._as_latent_tensor(z).detach().cpu().numpy()
+        z_array = np.asarray(self._as_latent_tensor(z).detach().cpu().tolist(), dtype=np.float32)
         return GeneratedDFN(
             z=z_array,
             tanh=tanh[:, 0],
