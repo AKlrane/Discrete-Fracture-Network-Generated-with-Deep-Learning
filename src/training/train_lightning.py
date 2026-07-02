@@ -40,7 +40,11 @@ from src.training.train_flow_matching import create_model as create_flow_model
 from src.training.train_flow_matching import create_lr_scheduler as create_flow_lr_scheduler
 from src.training.train_flow_matching import create_optimizer as create_flow_optimizer
 from src.training.train_flow_matching import flow_matching_loss, sample_flow
-from src.training.train_wae import mmd_imq, wae_reconstruction_loss
+from src.training.train_wae import (
+    mmd_regularization,
+    regularization_weight,
+    wae_reconstruction_loss_and_metrics,
+)
 from src.training.train_vqvae import create_model as create_vqvae_model
 from src.training.train_vqvae import create_optimizer as create_vqvae_optimizer
 from src.training.train_vqvae import save_vqvae_samples, vqvae_loss
@@ -175,6 +179,7 @@ class WAELightningModule(pl.LightningModule):
         self.automatic_optimization = False
         self.config = config
         self.training_cfg = config["training"]
+        self.data_cfg = config["data"]
         self.model_cfg = config["model"]
         self.regularizer_cfg = config["regularizer"]
         self.regularizer_type = str(self.regularizer_cfg["type"]).lower()
@@ -196,6 +201,12 @@ class WAELightningModule(pl.LightningModule):
             )
             self.latent_discriminator.apply(wae_weights_init)
         self.fixed_noise = torch.randn(int(self.training_cfg["num_sample_images"]), self.latent_dim)
+        dataset = DFNDataset(
+            image_dir=resolve_path(self.data_cfg["image_dir"]),
+            image_size=int(self.data_cfg["image_size"]),
+        )
+        num_sample_images = min(int(self.training_cfg["num_sample_images"]), len(dataset))
+        self.fixed_images = torch.stack([dataset[index] for index in range(num_sample_images)])
 
     def configure_optimizers(self) -> torch.optim.Optimizer | list[torch.optim.Optimizer]:
         betas = (float(self.training_cfg["beta1"]), float(self.training_cfg["beta2"]))
@@ -247,7 +258,7 @@ class WAELightningModule(pl.LightningModule):
 
         encoded = self.encoder(real_images)
         reconstructed = self.decoder(encoded)
-        reconstruction_loss = wae_reconstruction_loss(
+        reconstruction_loss, reconstruction_metrics = wae_reconstruction_loss_and_metrics(
             reconstructed,
             real_images,
             self.regularizer_cfg,
@@ -260,12 +271,29 @@ class WAELightningModule(pl.LightningModule):
                 float(scale)
                 for scale in self.regularizer_cfg.get("imq_scales", [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0])
             ]
-            mmd_loss = mmd_imq(encoded, prior_z, imq_scales)
+            mmd_loss, mmd_penalty, mmd_baseline = mmd_regularization(
+                encoded,
+                prior_z,
+                imq_scales,
+                self.regularizer_cfg,
+            )
+            current_lambda_mmd = regularization_weight(
+                self.regularizer_cfg,
+                "lambda_mmd",
+                "lambda_mmd_warmup_steps",
+                int(self.global_step),
+                default=10.0,
+            )
+            weighted_mmd_loss = current_lambda_mmd * mmd_penalty
             adversarial_loss = torch.tensor(float("nan"), device=self.device)
-            total_loss = lambda_recon * reconstruction_loss + float(self.regularizer_cfg.get("lambda_mmd", 10.0)) * mmd_loss
+            total_loss = lambda_recon * reconstruction_loss + weighted_mmd_loss
         else:
             assert self.latent_discriminator is not None
             mmd_loss = torch.tensor(float("nan"), device=self.device)
+            mmd_penalty = torch.tensor(float("nan"), device=self.device)
+            mmd_baseline = torch.tensor(float("nan"), device=self.device)
+            current_lambda_mmd = float("nan")
+            weighted_mmd_loss = torch.tensor(float("nan"), device=self.device)
             encoded_logits_for_autoencoder = self.latent_discriminator(encoded)
             adversarial_loss = F.binary_cross_entropy_with_logits(
                 encoded_logits_for_autoencoder,
@@ -281,7 +309,30 @@ class WAELightningModule(pl.LightningModule):
             {
                 "total_loss": total_loss.detach(),
                 "reconstruction_loss": reconstruction_loss.detach(),
+                "base_reconstruction_loss": reconstruction_metrics[
+                    "base_reconstruction_loss"
+                ].detach(),
+                "bce_loss": reconstruction_metrics["bce_loss"].detach(),
+                "dice_loss": reconstruction_metrics["dice_loss"].detach(),
+                "edge_loss": reconstruction_metrics["edge_loss"].detach(),
+                "weighted_edge_loss": reconstruction_metrics["weighted_edge_loss"].detach(),
+                "multiscale_dice_loss": reconstruction_metrics[
+                    "multiscale_dice_loss"
+                ].detach(),
+                "weighted_multiscale_dice_loss": reconstruction_metrics[
+                    "weighted_multiscale_dice_loss"
+                ].detach(),
+                "foreground_ratio_loss": reconstruction_metrics[
+                    "foreground_ratio_loss"
+                ].detach(),
+                "weighted_foreground_ratio_loss": reconstruction_metrics[
+                    "weighted_foreground_ratio_loss"
+                ].detach(),
                 "mmd_loss": mmd_loss.detach(),
+                "mmd_penalty": mmd_penalty.detach(),
+                "mmd_baseline": mmd_baseline.detach(),
+                "mmd_weight": torch.tensor(current_lambda_mmd, device=self.device),
+                "weighted_mmd_loss": weighted_mmd_loss.detach(),
                 "adversarial_loss": adversarial_loss.detach(),
                 "discriminator_loss": discriminator_loss.detach(),
                 "encoded_score_mean": encoded_score_mean,
@@ -293,15 +344,24 @@ class WAELightningModule(pl.LightningModule):
         )
 
     def save_sample_grid(self, sample_dir: Path, step: int) -> None:
+        self.encoder.eval()
         self.decoder.eval()
         with torch.no_grad():
             samples = self.decoder(self.fixed_noise.to(self.device))
+            fixed_images = self.fixed_images.to(self.device)
+            reconstructed = self.decoder(self.encoder(fixed_images))
         nrow = int(math.sqrt(int(self.training_cfg["num_sample_images"])))
         save_image_grid(samples, sample_dir / f"step_{step:07d}.png", nrow=nrow)
+        save_image_grid(
+            reconstructed,
+            sample_dir / f"step_{step:07d}_recon.png",
+            nrow=nrow,
+        )
+        self.encoder.train()
         self.decoder.train()
 
 
-class FlowMatchingLightningModule(pl.LightningModule):
+class LegacyFlowMatchingLightningModule(pl.LightningModule):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__()
         self.config = config
@@ -337,17 +397,24 @@ class FlowMatchingLightningModule(pl.LightningModule):
 
     def training_step(self, real_images: torch.Tensor, batch_idx: int) -> torch.Tensor:
         loss, metrics = flow_matching_loss(self.model, real_images, self.training_cfg)
-        self.log_dict(
-            {
-                "loss": loss.detach(),
-                "t_mean": metrics["t_mean"],
-                "target_velocity_norm": metrics["target_velocity_norm"],
-                "predicted_velocity_norm": metrics["predicted_velocity_norm"],
-            },
-            prog_bar=True,
-            on_step=True,
-            on_epoch=False,
-        )
+        log_values = {
+            "loss": loss.detach(),
+            "t_mean": metrics["t_mean"],
+            "target_velocity_norm": metrics["target_velocity_norm"],
+            "predicted_velocity_norm": metrics["predicted_velocity_norm"],
+            "velocity_cosine_similarity": metrics["velocity_cosine_similarity"],
+        }
+        for metric_name in (
+            "fracture_loss",
+            "near_fracture_loss",
+            "background_loss",
+            "fracture_pixel_ratio",
+            "near_pixel_ratio",
+            "loss_weight_mean",
+        ):
+            if metric_name in metrics:
+                log_values[metric_name] = metrics[metric_name]
+        self.log_dict(log_values, prog_bar=True, on_step=True, on_epoch=False)
         return loss
 
     def save_sample_grid(self, sample_dir: Path, step: int) -> None:
@@ -362,6 +429,9 @@ class FlowMatchingLightningModule(pl.LightningModule):
         nrow = int(math.sqrt(int(self.training_cfg["num_sample_images"])))
         save_image_grid(samples, sample_dir / f"step_{step:07d}.png", nrow=nrow)
         self.model.train()
+
+
+FlowMatchingLightningModule = LegacyFlowMatchingLightningModule
 
 
 class VQVAELightningModule(pl.LightningModule):
@@ -395,6 +465,8 @@ class VQVAELightningModule(pl.LightningModule):
             {
                 "total_loss": metrics["total_loss"],
                 "reconstruction_loss": metrics["reconstruction_loss"],
+                "bce_loss": metrics["bce_loss"],
+                "dice_loss": metrics["dice_loss"],
                 "vq_loss": metrics["vq_loss"],
                 "perplexity": metrics["perplexity"],
                 "code_usage": metrics["code_usage"],
@@ -419,19 +491,26 @@ class VQVAELightningModule(pl.LightningModule):
 
 def create_model(config: dict[str, Any], model_type: str) -> pl.LightningModule:
     if model_type == "auto":
-        if config.get("method") in {"flow_matching", "vqvae"}:
+        if config.get("method") in {"flow_matching", "flow_matching_legacy", "vqvae"}:
             model_type = str(config["method"])
+        elif config.get("method") == "latent_flow_matching":
+            raise ValueError(
+                "latent_flow_matching uses a frozen autoencoder plus a separate latent prior. "
+                "Train it with src/training/train_latent_flow_matching.py."
+            )
         else:
             model_type = "wae" if "regularizer" in config else "wgan_gp"
+    if model_type == "flow_matching":
+        model_type = "flow_matching_legacy"
     if model_type == "wgan_gp":
         return WGANLightningModule(config)
     if model_type == "wae":
         return WAELightningModule(config)
-    if model_type == "flow_matching":
-        return FlowMatchingLightningModule(config)
+    if model_type == "flow_matching_legacy":
+        return LegacyFlowMatchingLightningModule(config)
     if model_type == "vqvae":
         return VQVAELightningModule(config)
-    raise ValueError("--model must be one of: auto, wgan_gp, wae, flow_matching, vqvae")
+    raise ValueError("--model must be one of: auto, wgan_gp, wae, flow_matching_legacy, flow_matching, vqvae")
 
 
 def create_dataloader(config: dict[str, Any]) -> DataLoader:
@@ -502,7 +581,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=Path("configs/wgan_gp_128.yaml"))
     parser.add_argument(
         "--model",
-        choices=("auto", "wgan_gp", "wae", "flow_matching", "vqvae"),
+        choices=("auto", "wgan_gp", "wae", "flow_matching_legacy", "flow_matching", "vqvae"),
         default="auto",
     )
     parser.add_argument("--resume", type=Path, default=None)

@@ -1,0 +1,40 @@
+method: beta_vae
+
+data:
+  image_dir: data/synthetic_dfn_teng_50_128/images
+  image_size: 128
+
+model:
+  latent_dim: 16
+  image_channels: 1
+  base_channels: 64
+
+loss:
+  reconstruction: bce_dice
+  bce_weight: 0.5
+  dice_smooth: 1.0
+  probability_eps: 0.000001
+  lambda_recon: 1.0
+  kl_objective: capacity
+  capacity_start: 4.0
+  capacity_max: 12.0
+  capacity_warmup_steps: 50000
+  capacity_gamma: 0.05
+  capacity_loss: absolute
+
+training:
+  batch_size: 64
+  num_epochs: 200
+  lr: 0.0001
+  beta1: 0.0
+  beta2: 0.9
+  sample_interval: 500
+  checkpoint_interval: 50
+  num_sample_images: 64
+  seed: 42
+  device: auto
+
+outputs:
+  sample_dir: outputs/beta_vae_16_capacity/samples
+  checkpoint_dir: outputs/beta_vae_16_capacity/checkpoints
+  log_dir: outputs/beta_vae_16_capacity/logs

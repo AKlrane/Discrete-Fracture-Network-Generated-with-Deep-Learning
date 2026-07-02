@@ -1,0 +1,38 @@
+method: sphere_encoder
+
+data:
+  image_dir: data/synthetic_dfn_teng_50_128/images
+  image_size: 128
+
+model:
+  latent_dim: 16
+  image_channels: 1
+  base_channels: 64
+  noise_angle_degrees: 80.0
+  spherify_eps: 0.000001
+
+loss:
+  reconstruction: smooth_l1
+  probability_eps: 0.000001
+  lambda_recon: 1.0
+  pixel_consistency_weight: 1.0
+  latent_consistency_weight: 0.1
+  sub_noise_max_scale: 0.5
+  smooth_l1_beta: 1.0
+
+training:
+  batch_size: 64
+  num_epochs: 200
+  lr: 0.0001
+  beta1: 0.0
+  beta2: 0.9
+  sample_interval: 500
+  checkpoint_interval: 50
+  num_sample_images: 64
+  seed: 42
+  device: auto
+
+outputs:
+  sample_dir: outputs/sphere_encoder_16_paper/samples
+  checkpoint_dir: outputs/sphere_encoder_16_paper/checkpoints
+  log_dir: outputs/sphere_encoder_16_paper/logs

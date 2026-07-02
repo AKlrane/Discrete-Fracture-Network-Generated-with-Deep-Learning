@@ -89,8 +89,8 @@ class Upsample(nn.Module):
         return self.conv(x)
 
 
-class TimeConditionedUNet(nn.Module):
-    """UNet velocity field for pixel-space Flow Matching."""
+class LegacyTimeConditionedUNet(nn.Module):
+    """Legacy UNet velocity field for pixel-space Flow Matching."""
 
     def __init__(
         self,
@@ -183,6 +183,10 @@ class TimeConditionedUNet(nn.Module):
                 x = self.upsamples[index](x)
 
         return self.output_conv(F.silu(self.output_norm(x)))
+
+
+# Backward-compatible name for existing imports and checkpoints.
+TimeConditionedUNet = LegacyTimeConditionedUNet
 
 
 def weights_init(module: nn.Module) -> None:

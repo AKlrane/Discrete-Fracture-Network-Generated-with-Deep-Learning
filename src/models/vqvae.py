@@ -61,11 +61,13 @@ class Decoder(nn.Module):
             nn.ConvTranspose2d(hidden_channels, hidden_channels // 2, 4, 2, 1),  # 64x64
             nn.ReLU(inplace=True),
             nn.ConvTranspose2d(hidden_channels // 2, image_channels, 4, 2, 1),  # 128x128
-            nn.Tanh(),
         )
 
-    def forward(self, quantized: torch.Tensor) -> torch.Tensor:
+    def forward_logits(self, quantized: torch.Tensor) -> torch.Tensor:
         return self.net(quantized)
+
+    def forward(self, quantized: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(self.forward_logits(quantized))
 
 
 class VectorQuantizer(nn.Module):
@@ -158,10 +160,20 @@ class VQVAE(nn.Module):
     def forward(
         self,
         images: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return_logits: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         z = self.encoder(images)
         quantized, vq_loss, perplexity, indices = self.quantizer(z)
-        reconstructed = self.decoder(quantized)
+        decoder_logits = self.decoder.forward_logits(quantized)
+        reconstructed = torch.tanh(decoder_logits)
+        if return_logits:
+            return reconstructed, decoder_logits, vq_loss, perplexity, indices
         return reconstructed, vq_loss, perplexity, indices
 
 

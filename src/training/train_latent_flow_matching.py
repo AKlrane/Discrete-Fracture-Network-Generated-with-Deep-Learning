@@ -16,7 +16,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.datasets.dfn_dataset import DFNDataset
-from src.models.flow_matching import LegacyTimeConditionedUNet, weights_init
+from src.models.latent_flow_matching import LatentFlowMLP, weights_init
+from src.models.wae import Decoder, Encoder
 from src.utils.device import select_device
 from src.utils.image_utils import save_image_grid
 from src.utils.seed import set_seed
@@ -61,21 +62,105 @@ def append_log(log_path: Path, row: dict[str, float | int | str]) -> None:
         writer.writerow(row)
 
 
-def create_model(config: dict[str, Any]) -> LegacyTimeConditionedUNet:
-    model_cfg = config["model"]
-    return LegacyTimeConditionedUNet(
-        image_channels=int(model_cfg.get("image_channels", 1)),
-        base_channels=int(model_cfg.get("base_channels", 32)),
-        channel_multipliers=[
-            int(multiplier)
-            for multiplier in model_cfg.get("channel_multipliers", [1, 2, 4, 8])
-        ],
-        time_embedding_dim=(
-            int(model_cfg["time_embedding_dim"])
-            if "time_embedding_dim" in model_cfg
-            else None
-        ),
-        groups=int(model_cfg.get("groups", 8)),
+def load_checkpoint(path: str | Path, map_location: str | torch.device = "cpu") -> dict[str, Any]:
+    try:
+        checkpoint = torch.load(Path(path), map_location=map_location, weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(Path(path), map_location=map_location)
+    if not isinstance(checkpoint, dict):
+        raise TypeError(f"Expected checkpoint dictionary, got {type(checkpoint).__name__}")
+    return checkpoint
+
+
+def prefixed_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    prefixes: tuple[str, ...],
+) -> dict[str, torch.Tensor]:
+    for prefix in prefixes:
+        if any(key.startswith(prefix) for key in state_dict):
+            return {
+                key.removeprefix(prefix): value
+                for key, value in state_dict.items()
+                if key.startswith(prefix)
+            }
+    return {}
+
+
+def infer_autoencoder_model_config(
+    checkpoint: dict[str, Any],
+    autoencoder_cfg: dict[str, Any],
+    flow_model_cfg: dict[str, Any],
+) -> dict[str, int]:
+    checkpoint_config = checkpoint.get("config")
+    checkpoint_model_cfg = {}
+    if isinstance(checkpoint_config, dict):
+        checkpoint_model_cfg = checkpoint_config.get("model") or {}
+
+    latent_dim = int(
+        autoencoder_cfg.get(
+            "latent_dim",
+            checkpoint_model_cfg.get("latent_dim", flow_model_cfg.get("latent_dim", 16)),
+        )
+    )
+    base_channels = int(autoencoder_cfg.get("base_channels", checkpoint_model_cfg.get("base_channels", 64)))
+    image_channels = int(autoencoder_cfg.get("image_channels", checkpoint_model_cfg.get("image_channels", 1)))
+    return {
+        "latent_dim": latent_dim,
+        "base_channels": base_channels,
+        "image_channels": image_channels,
+    }
+
+
+def load_autoencoder(
+    config: dict[str, Any],
+    device: torch.device,
+) -> tuple[Encoder, Decoder, dict[str, int], Path]:
+    autoencoder_cfg = config["autoencoder"]
+    flow_model_cfg = config["flow_model"]
+    checkpoint_path = resolve_path(autoencoder_cfg["checkpoint"])
+    checkpoint = load_checkpoint(checkpoint_path, map_location=device)
+    model_cfg = infer_autoencoder_model_config(checkpoint, autoencoder_cfg, flow_model_cfg)
+
+    encoder = Encoder(**model_cfg).to(device)
+    decoder = Decoder(**model_cfg).to(device)
+
+    if "encoder" in checkpoint and "decoder" in checkpoint:
+        encoder.load_state_dict(checkpoint["encoder"])
+        decoder.load_state_dict(checkpoint["decoder"])
+    elif "state_dict" in checkpoint and isinstance(checkpoint["state_dict"], dict):
+        state_dict = checkpoint["state_dict"]
+        encoder_state = prefixed_state_dict(
+            state_dict,
+            ("encoder.", "module.encoder.", "model.encoder."),
+        )
+        decoder_state = prefixed_state_dict(
+            state_dict,
+            ("decoder.", "module.decoder.", "model.decoder."),
+        )
+        if not encoder_state or not decoder_state:
+            raise KeyError("Lightning checkpoint must contain encoder.* and decoder.* weights")
+        encoder.load_state_dict(encoder_state)
+        decoder.load_state_dict(decoder_state)
+    else:
+        raise KeyError("Autoencoder checkpoint must contain encoder/decoder weights")
+
+    encoder.eval()
+    decoder.eval()
+    for parameter in encoder.parameters():
+        parameter.requires_grad_(False)
+    for parameter in decoder.parameters():
+        parameter.requires_grad_(False)
+    return encoder, decoder, model_cfg, checkpoint_path
+
+
+def create_model(config: dict[str, Any]) -> LatentFlowMLP:
+    model_cfg = config["flow_model"]
+    return LatentFlowMLP(
+        latent_dim=int(model_cfg.get("latent_dim", 16)),
+        hidden_dim=int(model_cfg.get("hidden_dim", 256)),
+        num_blocks=int(model_cfg.get("num_blocks", 4)),
+        time_embedding_dim=int(model_cfg.get("time_embedding_dim", 64)),
+        dropout=float(model_cfg.get("dropout", 0.0)),
     )
 
 
@@ -95,7 +180,7 @@ def create_optimizer(
     )
 
 
-def _scheduler_config(training_cfg: dict[str, Any]) -> dict[str, Any]:
+def scheduler_config(training_cfg: dict[str, Any]) -> dict[str, Any]:
     scheduler_cfg = training_cfg.get("scheduler")
     if scheduler_cfg is None:
         return {"enabled": False, "type": "none"}
@@ -111,19 +196,19 @@ def create_lr_scheduler(
     training_cfg: dict[str, Any],
     total_steps: int,
 ) -> torch.optim.lr_scheduler.LambdaLR | None:
-    scheduler_cfg = _scheduler_config(training_cfg)
-    scheduler_type = str(scheduler_cfg.get("type", scheduler_cfg.get("preset", "none"))).lower()
-    enabled = bool(scheduler_cfg.get("enabled", scheduler_type not in {"none", "constant", "off"}))
+    config = scheduler_config(training_cfg)
+    scheduler_type = str(config.get("type", config.get("preset", "none"))).lower()
+    enabled = bool(config.get("enabled", scheduler_type not in {"none", "constant", "off"}))
     if not enabled or scheduler_type in {"none", "constant", "off"}:
         return None
     if scheduler_type not in {"cosine", "cosine_warmup", "warmup_cosine"}:
         raise ValueError("training.scheduler.type must be one of: none, constant, cosine")
 
     base_lr = float(training_cfg["lr"])
-    min_lr = float(scheduler_cfg.get("min_lr", 0.0))
-    min_lr_ratio = float(scheduler_cfg.get("min_lr_ratio", min_lr / base_lr if base_lr > 0.0 else 0.0))
-    warmup_steps = int(scheduler_cfg.get("warmup_steps", 0))
-    total_steps = int(scheduler_cfg.get("total_steps", total_steps))
+    min_lr = float(config.get("min_lr", 0.0))
+    min_lr_ratio = float(config.get("min_lr_ratio", min_lr / base_lr if base_lr > 0.0 else 0.0))
+    warmup_steps = int(config.get("warmup_steps", 0))
+    total_steps = int(config.get("total_steps", total_steps))
 
     if total_steps < 1:
         raise ValueError("scheduler total_steps must be positive")
@@ -144,7 +229,7 @@ def create_lr_scheduler(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 
-def _time_sampling_config(training_cfg: dict[str, Any] | None) -> dict[str, Any]:
+def time_sampling_config(training_cfg: dict[str, Any] | None) -> dict[str, Any]:
     if training_cfg is None:
         return {"distribution": "uniform"}
     time_cfg = training_cfg.get("time_sampling", "uniform")
@@ -161,13 +246,13 @@ def sample_timesteps(
     dtype: torch.dtype,
     training_cfg: dict[str, Any] | None = None,
 ) -> torch.Tensor:
-    time_cfg = _time_sampling_config(training_cfg)
-    distribution = str(time_cfg.get("distribution", time_cfg.get("type", "uniform"))).lower()
+    config = time_sampling_config(training_cfg)
+    distribution = str(config.get("distribution", config.get("type", "uniform"))).lower()
     if distribution == "uniform":
         return torch.rand(batch_size, device=device, dtype=dtype)
     if distribution == "beta":
-        alpha = float(time_cfg.get("alpha", time_cfg.get("beta_alpha", 2.0)))
-        beta = float(time_cfg.get("beta", time_cfg.get("beta_beta", 1.0)))
+        alpha = float(config.get("alpha", config.get("beta_alpha", 2.0)))
+        beta = float(config.get("beta", config.get("beta_beta", 1.0)))
         if alpha <= 0.0 or beta <= 0.0:
             raise ValueError("beta time sampling requires alpha > 0 and beta > 0")
         sample_device = torch.device("cpu") if device.type == "mps" else device
@@ -180,119 +265,38 @@ def sample_timesteps(
     raise ValueError("training.time_sampling.distribution must be one of: uniform, beta")
 
 
-def _loss_config(training_cfg: dict[str, Any] | None) -> dict[str, Any]:
-    if training_cfg is None:
-        return {"type": "mse"}
-    loss_cfg = training_cfg.get("loss", "mse")
-    if isinstance(loss_cfg, str):
-        return {"type": loss_cfg}
-    if not isinstance(loss_cfg, dict):
-        raise TypeError("training.loss must be a string, mapping, or omitted")
-    return loss_cfg
-
-
-def dilate_mask(mask: torch.Tensor, kernel_size: int) -> torch.Tensor:
-    if kernel_size <= 1:
-        return mask
-    if kernel_size % 2 != 1:
-        raise ValueError("training.loss.dilation_kernel_size must be an odd integer")
-    padding = kernel_size // 2
-    return F.max_pool2d(mask, kernel_size=kernel_size, stride=1, padding=padding)
-
-
-def build_fracture_loss_masks(
-    real_images: torch.Tensor,
-    loss_cfg: dict[str, Any],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    threshold = float(loss_cfg.get("threshold", 0.0))
-    core_mask = (real_images > threshold).float()
-    near_kernel_size = int(loss_cfg.get("near_kernel_size", loss_cfg.get("dilation_kernel_size", 1)))
-    near_mask = dilate_mask(core_mask, near_kernel_size).sub(core_mask).clamp(0.0, 1.0)
-    return core_mask, near_mask
-
-
-def weighted_flow_matching_mse(
-    predicted_velocity: torch.Tensor,
-    target_velocity: torch.Tensor,
-    real_images: torch.Tensor,
-    loss_cfg: dict[str, Any],
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    core_mask, near_mask = build_fracture_loss_masks(real_images, loss_cfg)
-    if core_mask.shape[1] == 1 and predicted_velocity.shape[1] > 1:
-        core_mask = core_mask.expand_as(predicted_velocity)
-        near_mask = near_mask.expand_as(predicted_velocity)
-
-    alpha = float(loss_cfg.get("alpha", loss_cfg.get("alpha_core", 10.0)))
-    alpha_core = float(loss_cfg.get("alpha_core", alpha))
-    alpha_near = float(loss_cfg.get("alpha_near", 0.0))
-    weight = 1.0 + alpha_core * core_mask + alpha_near * near_mask
-    squared_error = (predicted_velocity - target_velocity).pow(2)
-    loss = (weight * squared_error).sum() / weight.sum().clamp_min(1e-8)
-
-    background_mask = (1.0 - core_mask - near_mask).clamp(0.0, 1.0)
-    fracture_loss = (squared_error * core_mask).sum() / core_mask.sum().clamp_min(1e-8)
-    near_loss = (squared_error * near_mask).sum() / near_mask.sum().clamp_min(1e-8)
-    background_loss = (squared_error * background_mask).sum() / background_mask.sum().clamp_min(1e-8)
-
-    metrics = {
-        "fracture_loss": fracture_loss.detach(),
-        "near_fracture_loss": near_loss.detach(),
-        "background_loss": background_loss.detach(),
-        "fracture_pixel_ratio": core_mask.detach().mean(),
-        "near_pixel_ratio": near_mask.detach().mean(),
-        "loss_weight_mean": weight.detach().mean(),
-    }
-    return loss, metrics
-
-
-def flow_matching_loss(
-    model: LegacyTimeConditionedUNet,
-    real_images: torch.Tensor,
+def latent_flow_matching_loss(
+    model: LatentFlowMLP,
+    encoded_latents: torch.Tensor,
     training_cfg: dict[str, Any] | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    batch_size = real_images.size(0)
-    x0 = torch.randn_like(real_images)
-    t = sample_timesteps(
-        batch_size,
-        real_images.device,
-        real_images.dtype,
-        training_cfg,
-    )
-    t_view = t.view(batch_size, 1, 1, 1)
-    x_t = (1.0 - t_view) * x0 + t_view * real_images
-    target_velocity = real_images - x0
-    predicted_velocity = model(x_t, t)
-    loss_cfg = _loss_config(training_cfg)
-    loss_type = str(loss_cfg.get("type", "mse")).lower()
-    if loss_type in {"mse", "plain_mse", "unweighted_mse"}:
-        loss = F.mse_loss(predicted_velocity, target_velocity)
-        loss_metrics: dict[str, torch.Tensor] = {}
-    elif loss_type in {"weighted_mse", "normalized_weighted_mse", "fracture_weighted_mse"}:
-        loss, loss_metrics = weighted_flow_matching_mse(
-            predicted_velocity,
-            target_velocity,
-            real_images,
-            loss_cfg,
-        )
-    else:
-        raise ValueError("training.loss.type must be one of: mse, weighted_mse")
+    batch_size = encoded_latents.size(0)
+    z0 = torch.randn_like(encoded_latents)
+    t = sample_timesteps(batch_size, encoded_latents.device, encoded_latents.dtype, training_cfg)
+    t_view = t.view(batch_size, 1)
+    z_t = (1.0 - t_view) * z0 + t_view * encoded_latents
+    target_velocity = encoded_latents - z0
+    predicted_velocity = model(z_t, t)
+    loss = F.mse_loss(predicted_velocity, target_velocity)
 
     cosine_similarity = F.cosine_similarity(
-        predicted_velocity.detach().flatten(1),
-        target_velocity.detach().flatten(1),
+        predicted_velocity.detach(),
+        target_velocity.detach(),
         dim=1,
     ).mean()
     metrics = {
         "t_mean": t.detach().mean(),
-        "target_velocity_norm": target_velocity.detach().flatten(1).norm(dim=1).mean(),
-        "predicted_velocity_norm": predicted_velocity.detach().flatten(1).norm(dim=1).mean(),
+        "latent_mean": encoded_latents.detach().mean(),
+        "latent_std": encoded_latents.detach().std(unbiased=False),
+        "latent_norm": encoded_latents.detach().norm(dim=1).mean(),
+        "target_velocity_norm": target_velocity.detach().norm(dim=1).mean(),
+        "predicted_velocity_norm": predicted_velocity.detach().norm(dim=1).mean(),
         "velocity_cosine_similarity": cosine_similarity,
     }
-    metrics.update(loss_metrics)
     return loss, metrics
 
 
-def _validate_sampler(solver: str, num_steps: int) -> str:
+def validate_sampler(solver: str, num_steps: int) -> str:
     solver = solver.lower()
     if solver not in {"euler", "heun", "midpoint"}:
         raise ValueError("sampler.solver must be one of: euler, heun, midpoint")
@@ -302,56 +306,42 @@ def _validate_sampler(solver: str, num_steps: int) -> str:
 
 
 @torch.no_grad()
-def sample_flow(
-    model: LegacyTimeConditionedUNet,
+def sample_latent_flow(
+    model: LatentFlowMLP,
     initial_noise: torch.Tensor,
-    solver: str = "euler",
-    num_steps: int = 50,
+    solver: str = "heun",
+    num_steps: int = 100,
 ) -> torch.Tensor:
-    solver = _validate_sampler(solver, num_steps)
-    x = initial_noise
+    solver = validate_sampler(solver, num_steps)
+    z = initial_noise
     dt = 1.0 / num_steps
-    batch_size = x.size(0)
+    batch_size = z.size(0)
 
     for step in range(num_steps):
         t_value = step / num_steps
-        t = torch.full(
-            (batch_size,),
-            t_value,
-            device=x.device,
-            dtype=x.dtype,
-        )
+        t = torch.full((batch_size,), t_value, device=z.device, dtype=z.dtype)
 
         if solver == "euler":
-            velocity = model(x, t)
-            x = x + dt * velocity
+            velocity = model(z, t)
+            z = z + dt * velocity
         elif solver == "midpoint":
-            velocity = model(x, t)
-            t_mid = torch.full(
-                (batch_size,),
-                t_value + 0.5 * dt,
-                device=x.device,
-                dtype=x.dtype,
-            )
-            midpoint = x + 0.5 * dt * velocity
-            x = x + dt * model(midpoint, t_mid)
+            velocity = model(z, t)
+            t_mid = torch.full((batch_size,), t_value + 0.5 * dt, device=z.device, dtype=z.dtype)
+            midpoint = z + 0.5 * dt * velocity
+            z = z + dt * model(midpoint, t_mid)
         else:
-            velocity = model(x, t)
-            proposal = x + dt * velocity
-            t_next = torch.full(
-                (batch_size,),
-                min(t_value + dt, 1.0),
-                device=x.device,
-                dtype=x.dtype,
-            )
+            velocity = model(z, t)
+            proposal = z + dt * velocity
+            t_next = torch.full((batch_size,), min(t_value + dt, 1.0), device=z.device, dtype=z.dtype)
             next_velocity = model(proposal, t_next)
-            x = x + 0.5 * dt * (velocity + next_velocity)
+            z = z + 0.5 * dt * (velocity + next_velocity)
 
-    return x.clamp(-1.0, 1.0)
+    return z
 
 
-def save_flow_samples(
-    model: LegacyTimeConditionedUNet,
+def save_latent_flow_samples(
+    model: LatentFlowMLP,
+    decoder: Decoder,
     fixed_noise: torch.Tensor,
     sample_dir: Path,
     global_step: int,
@@ -359,25 +349,29 @@ def save_flow_samples(
     sampler_cfg: dict[str, Any],
 ) -> None:
     model.eval()
-    samples = sample_flow(
-        model,
-        fixed_noise,
-        solver=str(sampler_cfg.get("solver", "euler")),
-        num_steps=int(sampler_cfg.get("num_steps", 50)),
-    )
+    decoder.eval()
+    with torch.no_grad():
+        latents = sample_latent_flow(
+            model,
+            fixed_noise,
+            solver=str(sampler_cfg.get("solver", "heun")),
+            num_steps=int(sampler_cfg.get("num_steps", 100)),
+        )
+        samples = decoder(latents)
     nrow = int(math.sqrt(num_sample_images))
     save_image_grid(samples, sample_dir / f"step_{global_step:07d}.png", nrow=nrow)
     model.train()
 
 
-def save_flow_matching_checkpoint(
+def save_latent_flow_checkpoint(
     path: str | Path,
-    model: LegacyTimeConditionedUNet,
+    model: LatentFlowMLP,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LambdaLR | None,
     epoch: int,
     step: int,
     config: dict[str, Any],
+    autoencoder_checkpoint: Path,
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -387,6 +381,7 @@ def save_flow_matching_checkpoint(
         "epoch": epoch,
         "step": step,
         "config": config,
+        "autoencoder_checkpoint": str(autoencoder_checkpoint),
     }
     if scheduler is not None:
         checkpoint["scheduler"] = scheduler.state_dict()
@@ -409,14 +404,14 @@ def align_scheduler_to_step(
     scheduler._last_lr = lrs
 
 
-def load_flow_matching_checkpoint(
+def load_latent_flow_checkpoint(
     path: str | Path,
-    model: LegacyTimeConditionedUNet,
+    model: LatentFlowMLP,
     optimizer: torch.optim.Optimizer | None = None,
     scheduler: torch.optim.lr_scheduler.LambdaLR | None = None,
     map_location: str | torch.device = "cpu",
 ) -> tuple[int, int]:
-    checkpoint = torch.load(Path(path), map_location=map_location)
+    checkpoint = load_checkpoint(path, map_location=map_location)
     model.load_state_dict(checkpoint["model"])
     if optimizer is not None and "optimizer" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -440,13 +435,18 @@ def train(
 
     if max_batches is not None and max_batches < 1:
         raise ValueError("--max_batches must be a positive integer")
-    _validate_sampler(
-        str(sampler_cfg.get("solver", "euler")),
-        int(sampler_cfg.get("num_steps", 50)),
-    )
+    validate_sampler(str(sampler_cfg.get("solver", "heun")), int(sampler_cfg.get("num_steps", 100)))
 
     set_seed(int(training_cfg["seed"]))
     device = select_device(str(training_cfg.get("device", "cuda")))
+    encoder, decoder, autoencoder_model_cfg, autoencoder_checkpoint = load_autoencoder(config, device)
+
+    model = create_model(config).to(device)
+    latent_dim = int(config["flow_model"].get("latent_dim", 16))
+    if latent_dim != int(autoencoder_model_cfg["latent_dim"]):
+        raise ValueError("flow_model.latent_dim must match autoencoder latent_dim")
+    model.apply(weights_init)
+    optimizer = create_optimizer(model, training_cfg)
 
     dataset = DFNDataset(
         image_dir=resolve_path(data_cfg["image_dir"]),
@@ -460,17 +460,13 @@ def train(
         pin_memory=device.type == "cuda",
         drop_last=True,
     )
-
-    model = create_model(config).to(device)
-    model.apply(weights_init)
-    optimizer = create_optimizer(model, training_cfg)
     total_steps = int(training_cfg["num_epochs"]) * max(1, len(dataloader))
     scheduler = create_lr_scheduler(optimizer, training_cfg, total_steps)
 
     start_epoch = 0
     global_step = 0
     if resume is not None:
-        start_epoch, global_step = load_flow_matching_checkpoint(
+        start_epoch, global_step = load_latent_flow_checkpoint(
             resume,
             model,
             optimizer,
@@ -482,15 +478,7 @@ def train(
     sample_dir = resolve_path(outputs_cfg["sample_dir"])
     checkpoint_dir = resolve_path(outputs_cfg["checkpoint_dir"])
     log_dir = resolve_path(outputs_cfg["log_dir"])
-    image_channels = int(config["model"].get("image_channels", 1))
-    image_size = int(data_cfg["image_size"])
-    fixed_noise = torch.randn(
-        int(training_cfg["num_sample_images"]),
-        image_channels,
-        image_size,
-        image_size,
-        device=device,
-    )
+    fixed_noise = torch.randn(int(training_cfg["num_sample_images"]), latent_dim, device=device)
     sample_interval = int(training_cfg["sample_interval"])
     checkpoint_interval = int(training_cfg["checkpoint_interval"])
     batches_this_run = 0
@@ -498,12 +486,15 @@ def train(
     saved_current_step_sample = False
     last_epoch = start_epoch - 1
 
+    model.train()
     for epoch in range(start_epoch, int(training_cfg["num_epochs"])):
         last_epoch = epoch
         progress = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{training_cfg['num_epochs']}")
         for real_images in progress:
             real_images = real_images.to(device)
-            loss, metrics = flow_matching_loss(model, real_images, training_cfg)
+            with torch.no_grad():
+                encoded = encoder(real_images)
+            loss, metrics = latent_flow_matching_loss(model, encoded, training_cfg)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -519,28 +510,23 @@ def train(
                 "step": global_step,
                 "loss": float(loss.detach().cpu()),
                 "t_mean": float(metrics["t_mean"].cpu()),
+                "latent_mean": float(metrics["latent_mean"].cpu()),
+                "latent_std": float(metrics["latent_std"].cpu()),
+                "latent_norm": float(metrics["latent_norm"].cpu()),
                 "target_velocity_norm": float(metrics["target_velocity_norm"].cpu()),
                 "predicted_velocity_norm": float(metrics["predicted_velocity_norm"].cpu()),
                 "velocity_cosine_similarity": float(metrics["velocity_cosine_similarity"].cpu()),
-                "sampler_solver": str(sampler_cfg.get("solver", "euler")),
-                "sampler_num_steps": int(sampler_cfg.get("num_steps", 50)),
+                "sampler_solver": str(sampler_cfg.get("solver", "heun")),
+                "sampler_num_steps": int(sampler_cfg.get("num_steps", 100)),
+                "autoencoder_checkpoint": str(autoencoder_checkpoint),
             }
-            for metric_name in (
-                "fracture_loss",
-                "near_fracture_loss",
-                "background_loss",
-                "fracture_pixel_ratio",
-                "near_pixel_ratio",
-                "loss_weight_mean",
-            ):
-                if metric_name in metrics:
-                    row[metric_name] = float(metrics[metric_name].cpu())
             append_log(log_dir / "train_log.csv", row)
             progress.set_postfix(loss=f"{row['loss']:.4f}", t=f"{row['t_mean']:.3f}")
 
             if global_step % sample_interval == 0:
-                save_flow_samples(
+                save_latent_flow_samples(
                     model,
+                    decoder,
                     fixed_noise,
                     sample_dir,
                     global_step,
@@ -554,22 +540,24 @@ def train(
                 break
 
         if (epoch + 1) % checkpoint_interval == 0 or should_stop:
-            save_flow_matching_checkpoint(
-                checkpoint_dir / f"flow_matching_epoch_{epoch + 1:04d}.pt",
+            save_latent_flow_checkpoint(
+                checkpoint_dir / f"latent_flow_matching_epoch_{epoch + 1:04d}.pt",
                 model,
                 optimizer,
                 scheduler,
                 epoch,
                 global_step,
                 config,
+                autoencoder_checkpoint,
             )
 
         if should_stop:
             break
 
     if global_step > 0 and not saved_current_step_sample:
-        save_flow_samples(
+        save_latent_flow_samples(
             model,
+            decoder,
             fixed_noise,
             sample_dir,
             global_step,
@@ -577,22 +565,23 @@ def train(
             sampler_cfg,
         )
 
-    save_flow_matching_checkpoint(
-        checkpoint_dir / "flow_matching_latest.pt",
+    save_latent_flow_checkpoint(
+        checkpoint_dir / "latent_flow_matching_latest.pt",
         model,
         optimizer,
         scheduler,
         max(0, last_epoch),
         global_step,
         config,
+        autoencoder_checkpoint,
     )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train the legacy pixel-space Flow Matching baseline on 2D DFN binary images."
+        description="Train 16D latent-space Flow Matching on frozen DFN autoencoder latents."
     )
-    parser.add_argument("--config", type=Path, default=Path("configs/flow_matching_128.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/latent_flow_matching_16.yaml"))
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--max_batches", type=int, default=None)
     return parser.parse_args()

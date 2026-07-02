@@ -1,0 +1,45 @@
+method: wae
+
+data:
+  image_dir: data/synthetic_dfn_teng_50_128/images
+  image_size: 128
+
+model:
+  latent_dim: 32
+  base_channels: 64
+
+regularizer:
+  type: mmd
+  reconstruction_loss: bce_dice_structural
+  bce_weight: 0.40
+  dice_smooth: 1.0
+  edge_weight: 0.20
+  multiscale_dice_weight: 0.20
+  multiscale_dice_scales: [2, 4]
+  foreground_ratio_weight: 1.0
+  probability_eps: 0.000001
+  lambda_recon: 1.0
+  lambda_mmd: 1.0
+  lambda_mmd_warmup_steps: 30000
+  mmd_estimator: biased
+  mmd_penalty: prior_baseline_corrected
+  mmd_baseline_batches: 1
+  imq_scales: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+
+training:
+  batch_size: 64
+  num_epochs: 200
+  lr: 0.0001
+  beta1: 0.0
+  beta2: 0.9
+  sample_interval: 500
+  checkpoint_interval: 50
+  num_sample_images: 64
+  seed: 42
+  device: auto
+  precision: 32-true
+
+outputs:
+  sample_dir: outputs/wae_mmd_32_structural_ratio/samples
+  checkpoint_dir: outputs/wae_mmd_32_structural_ratio/checkpoints
+  log_dir: outputs/wae_mmd_32_structural_ratio/logs

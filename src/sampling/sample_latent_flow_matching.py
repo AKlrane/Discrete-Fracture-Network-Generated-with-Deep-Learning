@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.training.train_flow_matching import create_model, sample_flow
+from src.training.train_latent_flow_matching import create_model, load_autoencoder, sample_latent_flow
 from src.utils.device import select_device
 from src.utils.image_utils import save_image_grid
 from src.utils.seed import set_seed
@@ -67,14 +67,9 @@ def normalize_state_dict(
 ) -> dict[str, torch.Tensor]:
     model_keys = set(model.state_dict().keys())
     candidates = [state_dict]
-    for prefix in ("model.", "module.", "_orig_mod.", "model._orig_mod."):
+    for prefix in ("model.", "module.", "_orig_mod.", "latent_flow.", "model._orig_mod."):
         candidates.append(strip_prefix(state_dict, prefix))
-
-    best_state_dict = max(
-        candidates,
-        key=lambda candidate: len(model_keys.intersection(candidate.keys())),
-    )
-    return best_state_dict
+    return max(candidates, key=lambda candidate: len(model_keys.intersection(candidate.keys())))
 
 
 def checkpoint_step(checkpoint: dict[str, Any]) -> int:
@@ -96,7 +91,6 @@ def default_output_path(
         out_dir = resolve_path(config["outputs"]["sample_dir"]) / "resampled"
     else:
         out_dir = resolve_path(out_dir)
-
     if out_prefix is None:
         step_label = f"step_{step:07d}" if step > 0 else "step_unknown"
         out_prefix = f"{step_label}_{solver}_{num_steps:04d}"
@@ -108,7 +102,6 @@ def save_individual_images(
     out_path: str | Path,
     threshold: float = 0.0,
 ) -> tuple[Path, Path]:
-    """Save one probability PNG and one binary PNG per sampled image."""
     out_path = Path(out_path)
     probability_dir = out_path.with_name(f"{out_path.stem}_prob")
     binary_dir = out_path.with_name(f"{out_path.stem}_binary")
@@ -118,26 +111,18 @@ def save_individual_images(
     probability = ((images.detach().cpu() + 1.0) / 2.0).clamp(0.0, 1.0)
     binary = (images.detach().cpu() > threshold).float()
     for index, (probability_image, binary_image) in enumerate(zip(probability, binary)):
-        save_image(
-            probability_image,
-            probability_dir / f"sample_{index:06d}.png",
-            normalize=False,
-        )
-        save_image(
-            binary_image,
-            binary_dir / f"sample_{index:06d}.png",
-            normalize=False,
-        )
+        save_image(probability_image, probability_dir / f"sample_{index:06d}.png", normalize=False)
+        save_image(binary_image, binary_dir / f"sample_{index:06d}.png", normalize=False)
     return probability_dir, binary_dir
 
 
 @torch.no_grad()
 def sample_in_batches(
     model: torch.nn.Module,
+    decoder: torch.nn.Module,
     num_images: int,
     batch_size: int,
-    image_channels: int,
-    image_size: int,
+    latent_dim: int,
     device: torch.device,
     solver: str,
     num_steps: int,
@@ -153,39 +138,36 @@ def sample_in_batches(
     samples = []
     remaining = num_images
     model.eval()
-
+    decoder.eval()
     while remaining > 0:
         current_batch_size = min(batch_size, remaining)
         noise = torch.randn(
             current_batch_size,
-            image_channels,
-            image_size,
-            image_size,
+            latent_dim,
             generator=generator,
             device="cpu",
         ).to(device)
-        samples.append(
-            sample_flow(
-                model,
-                noise,
-                solver=solver,
-                num_steps=num_steps,
-            ).cpu()
+        latents = sample_latent_flow(
+            model,
+            noise,
+            solver=solver,
+            num_steps=num_steps,
         )
+        samples.append(decoder(latents).cpu())
         remaining -= current_batch_size
-
     return torch.cat(samples, dim=0)
 
 
 def sample_from_checkpoint(args: argparse.Namespace) -> tuple[Path, Path]:
     config = load_config(resolve_path(args.config))
+    if args.autoencoder_checkpoint is not None:
+        config.setdefault("autoencoder", {})["checkpoint"] = str(args.autoencoder_checkpoint)
+
     sampler_cfg = config.get("sampler", {})
     training_cfg = config.get("training", {})
-    model_cfg = config["model"]
-    data_cfg = config["data"]
-
-    solver = args.solver or str(sampler_cfg.get("solver", "euler"))
-    num_steps = args.num_steps if args.num_steps is not None else int(sampler_cfg.get("num_steps", 50))
+    flow_model_cfg = config["flow_model"]
+    solver = args.solver or str(sampler_cfg.get("solver", "heun"))
+    num_steps = args.num_steps if args.num_steps is not None else int(sampler_cfg.get("num_steps", 100))
     seed = args.seed if args.seed is not None else int(training_cfg.get("seed", 42))
     device = select_device(args.device or str(training_cfg.get("device", "auto")))
     num_images = args.num_images if args.num_images is not None else int(training_cfg.get("num_sample_images", 64))
@@ -193,11 +175,13 @@ def sample_from_checkpoint(args: argparse.Namespace) -> tuple[Path, Path]:
     save_mode = args.save_mode or str(sampler_cfg.get("save_mode", "grid"))
     if save_mode not in {"grid", "individual", "both"}:
         raise ValueError("--save_mode must be one of: grid, individual, both")
-    image_channels = int(model_cfg.get("image_channels", 1))
-    image_size = int(data_cfg["image_size"])
-    nrow = args.nrow or int(math.sqrt(num_images))
 
     set_seed(seed)
+    _, decoder, autoencoder_model_cfg, autoencoder_checkpoint = load_autoencoder(config, device)
+    latent_dim = int(flow_model_cfg.get("latent_dim", 16))
+    if latent_dim != int(autoencoder_model_cfg["latent_dim"]):
+        raise ValueError("flow_model.latent_dim must match autoencoder latent_dim")
+
     checkpoint_path = resolve_path(args.checkpoint)
     checkpoint = load_checkpoint(checkpoint_path)
     model = create_model(config).to(device)
@@ -210,18 +194,20 @@ def sample_from_checkpoint(args: argparse.Namespace) -> tuple[Path, Path]:
         out_path = default_output_path(config, args.out_dir, args.out_prefix, step, solver, num_steps)
     else:
         out_path = resolve_path(out_path)
+    nrow = args.nrow or int(math.sqrt(num_images))
 
     samples = sample_in_batches(
         model,
+        decoder,
         num_images=num_images,
         batch_size=batch_size,
-        image_channels=image_channels,
-        image_size=image_size,
+        latent_dim=latent_dim,
         device=device,
         solver=solver,
         num_steps=num_steps,
         seed=seed,
     )
+
     probability_path: Path | None = None
     binary_path: Path | None = None
     probability_dir: Path | None = None
@@ -248,9 +234,11 @@ def sample_from_checkpoint(args: argparse.Namespace) -> tuple[Path, Path]:
                 "config": str(resolve_path(args.config)),
                 "checkpoint": str(checkpoint_path),
                 "checkpoint_step": step,
+                "autoencoder_checkpoint": str(autoencoder_checkpoint),
                 "device": str(device),
                 "num_images": num_images,
                 "batch_size": batch_size,
+                "latent_dim": latent_dim,
                 "seed": seed,
                 "solver": solver,
                 "num_steps": num_steps,
@@ -280,15 +268,11 @@ def sample_from_checkpoint(args: argparse.Namespace) -> tuple[Path, Path]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Sample DFN grids from a trained legacy Flow Matching checkpoint."
+        description="Sample DFN grids from a trained 16D latent-space Flow Matching checkpoint."
     )
-    parser.add_argument("--config", type=Path, default=Path("configs/flow_matching_128.yaml"))
-    parser.add_argument(
-        "--checkpoint",
-        type=Path,
-        required=True,
-        help="Legacy Flow Matching .pt checkpoint or Lightning .ckpt checkpoint.",
-    )
+    parser.add_argument("--config", type=Path, default=Path("configs/latent_flow_matching_16.yaml"))
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--autoencoder_checkpoint", type=Path, default=None)
     parser.add_argument("--out_dir", type=Path, default=None)
     parser.add_argument("--out_path", type=Path, default=None)
     parser.add_argument("--out_prefix", type=str, default=None)

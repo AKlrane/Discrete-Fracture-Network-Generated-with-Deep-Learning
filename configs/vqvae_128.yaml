@@ -1,7 +1,7 @@
 method: vqvae
 
 data:
-  image_dir: data/synthetic_dfn_128/images
+  image_dir: data/synthetic_dfn_teng_50_128/images
   image_size: 128
 
 model:
@@ -14,12 +14,15 @@ model:
   latent_downsample_factor: 8
 
 loss:
-  reconstruction: l1
+  reconstruction: bce_dice
+  bce_weight: 0.5
+  dice_smooth: 1.0
+  probability_eps: 0.000001
   lambda_recon: 1.0
   lambda_vq: 1.0
 
 training:
-  batch_size: 32
+  batch_size: 64
   num_epochs: 200
   lr: 0.0002
   beta1: 0.9
@@ -29,12 +32,12 @@ training:
   num_sample_images: 64
   seed: 42
   device: auto
-  precision: bf16-mixed
+  precision: 32-true
 
 sampling:
-  save_random_samples: true
+  save_random_samples: false
 
 outputs:
-  sample_dir: outputs/vqvae/samples
-  checkpoint_dir: outputs/vqvae/checkpoints
-  log_dir: outputs/vqvae/logs
+  sample_dir: outputs/vqvae_teng_50_128/samples
+  checkpoint_dir: outputs/vqvae_teng_50_128/checkpoints
+  log_dir: outputs/vqvae_teng_50_128/logs

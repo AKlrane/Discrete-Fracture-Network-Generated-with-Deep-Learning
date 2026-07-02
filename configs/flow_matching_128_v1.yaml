@@ -1,4 +1,4 @@
-method: flow_matching
+method: flow_matching_legacy
 
 data:
   image_dir: data/synthetic_dfn_128/images

@@ -1,19 +1,25 @@
-method: flow_matching_legacy
+method: latent_flow_matching
 
 data:
   image_dir: data/synthetic_dfn_teng_50_128/images
   image_size: 128
 
-model:
-  image_channels: 1
+autoencoder:
+  checkpoint: outputs/wae_mmd_16/checkpoints/wae_mmd_latest.pt
+  latent_dim: 16
   base_channels: 64
-  channel_multipliers: [1, 2, 4, 8]
-  time_embedding_dim: 128
-  groups: 8
+  image_channels: 1
+
+flow_model:
+  latent_dim: 16
+  hidden_dim: 256
+  num_blocks: 4
+  time_embedding_dim: 64
+  dropout: 0.0
 
 training:
   batch_size: 64
-  num_epochs: 100
+  num_epochs: 200
   lr: 0.0001
   beta1: 0.9
   beta2: 0.999
@@ -25,11 +31,11 @@ training:
   device: auto
   precision: bf16-mixed
   time_sampling:
-    distribution: beta
+    distribution: uniform
     beta_alpha: 2.0
     beta_beta: 1.0
   scheduler:
-    enabled: true
+    enabled: false
     type: cosine
     warmup_steps: 5000
     min_lr: 0.000001
@@ -39,6 +45,6 @@ sampler:
   num_steps: 100
 
 outputs:
-  sample_dir: outputs/flow_matching_teng_50H_new/samples
-  checkpoint_dir: outputs/flow_matching_teng_50H_new/checkpoints
-  log_dir: outputs/flow_matching_teng_50H_new/logs
+  sample_dir: outputs/latent_flow_matching_16/samples
+  checkpoint_dir: outputs/latent_flow_matching_16/checkpoints
+  log_dir: outputs/latent_flow_matching_16/logs

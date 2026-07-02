@@ -1,9 +1,11 @@
+method: wae
+
 data:
-  image_dir: data/synthetic_dfn_128/images
+  image_dir: data/synthetic_dfn_teng_50_128/images
   image_size: 128
 
 model:
-  latent_dim: 128
+  latent_dim: 16
   base_channels: 64
 
 regularizer:
@@ -29,9 +31,9 @@ training:
   num_sample_images: 64
   seed: 42
   device: auto
-  precision: bf16-mixed
+  precision: 32-true
 
 outputs:
-  sample_dir: outputs/wae_mmd/samples
-  checkpoint_dir: outputs/wae_mmd/checkpoints
-  log_dir: outputs/wae_mmd/logs
+  sample_dir: outputs/wae_mmd_16/samples
+  checkpoint_dir: outputs/wae_mmd_16/checkpoints
+  log_dir: outputs/wae_mmd_16/logs

@@ -1,9 +1,11 @@
+method: wae
+
 data:
-  image_dir: data/synthetic_dfn_128/images
+  image_dir: data/synthetic_dfn_teng_50_128/images
   image_size: 128
 
 model:
-  latent_dim: 128
+  latent_dim: 16
   base_channels: 64
 
 regularizer:
@@ -13,9 +15,11 @@ regularizer:
   dice_smooth: 1.0
   probability_eps: 0.000001
   lambda_recon: 1.0
-  lambda_mmd: 10.0
-  lambda_mmd_warmup_steps: 10000
+  lambda_mmd: 2.0
+  lambda_mmd_warmup_steps: 20000
   mmd_estimator: biased
+  mmd_penalty: prior_baseline_corrected
+  mmd_baseline_batches: 1
   imq_scales: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
 
 training:
@@ -29,9 +33,9 @@ training:
   num_sample_images: 64
   seed: 42
   device: auto
-  precision: bf16-mixed
+  precision: 32-true
 
 outputs:
-  sample_dir: outputs/wae_mmd/samples
-  checkpoint_dir: outputs/wae_mmd/checkpoints
-  log_dir: outputs/wae_mmd/logs
+  sample_dir: outputs/wae_mmd_16_corrected/samples
+  checkpoint_dir: outputs/wae_mmd_16_corrected/checkpoints
+  log_dir: outputs/wae_mmd_16_corrected/logs
