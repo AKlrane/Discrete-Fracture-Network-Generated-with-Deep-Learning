@@ -1,222 +1,398 @@
-# DFN Generative Baselines
+# Discrete Fracture Network Generation with Deep Learning
 
-This project is a minimal, runnable generative baseline for 2D DFN (Discrete Fracture Network) binary images. Each DFN image is a single-channel 128 x 128 PNG where 0 is matrix/background and 255 is fracture.
+This repository is part of course project done by Chaoran Liu and Zhi Xiang Koh, in Generation with Deep Learning course offered by Prof. Yizhou Wang in Peking University.
 
-The current scope is intentionally narrow: WGAN-GP, WAE, VQ-VAE, latent-space Flow Matching, and a legacy pixel-space Flow Matching baseline. It does not include EDFM or flow validation, or real outcrop data processing.
+The repository contains reproducible code for generating and evaluating 2D
+discrete fracture network (DFN) images with deep generative models. The project
+reproduces a WGAN-GP baseline following
 
-## Project Layout
+> Teng, Z., Wu, H., Zhang, J., Ju, X., & Qi, S. (2025). Generating high-fidelity discrete fracture networks from low-dimensional latent spaces using generative adversarial network. International Journal of Rock Mechanics and Mining Sciences, 196, 106301. <https://doi.org/10.1016/j.ijrmms.2025.106301>
 
-```text
-dfn_gan/
-  configs/wgan_gp_128.yaml
-  configs/wae_mmd_128.yaml
-  configs/wae_mmd_16.yaml
-  configs/wae_gan_128.yaml
-  configs/vqvae_128.yaml
-  configs/latent_flow_matching_16.yaml
-  configs/flow_matching_128.yaml
-  data/synthetic_dfn_128/images/
-  data/synthetic_dfn_128/metadata/
-  src/datasets/dfn_dataset.py
-  src/models/wgan_gp.py
-  src/models/wae.py
-  src/models/vqvae.py
-  src/models/latent_flow_matching.py
-  src/models/flow_matching.py
-  src/training/train_wgan_gp.py
-  src/training/train_wae.py
-  src/training/train_vqvae.py
-  src/training/train_latent_flow_matching.py
-  src/training/train_flow_matching.py
-  src/sampling/sample_latent_flow_matching.py
-  src/training/train_lightning.py
-  src/utils/
-  src/generate_synthetic_dfn.py
-  D:/dfn_gan_outputs/dfn_gan_128/samples/
-  D:/dfn_gan_outputs/dfn_gan_128/checkpoints/
-  D:/dfn_gan_outputs/dfn_gan_128/logs/
-  requirements.txt
-```
+adds several alternative generative models, and provides a common image-level evaluation
+pipeline for the results.
 
-## Install
+## What Is Included
 
-```bash
-pip install -r requirements.txt
-```
+- Teng-style synthetic DFN dataset generation with fractal positions, truncated
+  power-law lengths, and von Mises orientations.
+- WGAN-GP training for low-dimensional latent-to-DFN generation.
+- Alternative baselines: WAE-MMD, beta-VAE, VQ-VAE, Sphere Encoder, pixel-space
+  Flow Matching, and latent-space Flow Matching.
+- A shared evaluator that computes fracture pixel ratio, connected components,
+  largest component ratio, skeleton length, Hough line statistics, orientation
+  histograms, length histograms, occurrence overlays, and line-center heatmaps.
+- A proof-of-concept latent inversion workflow with a deterministic pressure
+  surrogate and an optional GEOS/EDFM adapter.
 
-## Generate Synthetic DFN Data
-
-From the `dfn_gan` directory:
-
-```bash
-python src/generate_synthetic_dfn.py --num_samples 10000 --image_size 128 --out_dir data/synthetic_dfn_128
-```
-
-The script writes PNG images to `data/synthetic_dfn_128/images` and JSON metadata to `data/synthetic_dfn_128/metadata`. Metadata includes `sample_id`, `image_size`, `num_fractures`, and per-fracture `center_x`, `center_y`, `length`, `angle`, and `width`.
-
-Optional controls include:
-
-```bash
-python src/generate_synthetic_dfn.py --orientation von_mises --von_mises_kappa 8.0 --length_distribution power_law
-```
-
-## Train WGAN-GP
-
-```bash
-python src/training/train_wgan_gp.py --config configs/wgan_gp_128.yaml
-```
-
-The trainer uses Wasserstein critic loss plus gradient penalty:
+## Repository Layout
 
 ```text
-critic_loss = fake_score.mean() - real_score.mean() + lambda_gp * gradient_penalty
-generator_loss = -fake_score.mean()
+configs/                         Experiment and dataset configuration files
+configs/dataset/                 Synthetic DFN dataset presets
+configs/inversion/               Latent inversion presets
+src/generate_synthetic_dfn.py     Synthetic DFN generator
+src/training/                    Training entry points
+src/sampling/                    Post-training samplers
+src/evaluation/evaluate_dfn.py    Shared image-level evaluator
+src/inversion/                   Latent inversion and forward-model utilities
+outputs/                         Generated artifacts and selected reference outputs
+requirements.txt                 Python package requirements
 ```
 
-The default config uses `device: auto`, which selects CUDA on Linux GPU hosts, MPS on Apple Silicon Macs, and CPU otherwise. You can also set `device` explicitly to `cuda`, `mps`, or `cpu`.
+## Environment
 
-## Train WAE
+Use Python 3.10 or newer from the repository root.
 
 ```bash
-python src/training/train_wae.py --config configs/wae_mmd_128.yaml
-python src/training/train_wae.py --config configs/wae_gan_128.yaml
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-WAE sample grids use the same probability and binary PNG format as WGAN-GP, so they can be evaluated by the same `evaluate_dfn.py` script.
+For GPU training, install a PyTorch build matching the local CUDA or accelerator
+stack before installing the remaining requirements. All configs use
+`device: auto`, which selects CUDA, Apple MPS, or CPU according to availability.
 
-The WAE-MMD config uses a binary-image reconstruction preset:
+## Reproduce the Synthetic Dataset
+
+The main paper experiments use a 50-fracture, 128 x 128 Teng-style synthetic
+dataset.
+
+```bash
+python src/generate_synthetic_dfn.py \
+  --config configs/dataset/teng_unconditioned_50_128.yaml
+```
+
+Expected output:
 
 ```text
-reconstruction_loss = bce_weight * BCE(probability, target) + (1 - bce_weight) * DiceLoss(probability, target)
+data/synthetic_dfn_teng_50_128/images/
+data/synthetic_dfn_teng_50_128/metadata/
 ```
 
-The trainer maps decoder outputs and normalized dataset tensors from `[-1, 1]` back to `[0, 1]` before computing BCE and Dice. WAE-MMD uses the biased IMQ-MMD estimator by default and can linearly warm up `lambda_mmd` with `regularizer.lambda_mmd_warmup_steps`; this keeps the latent penalty non-negative as a batch loss and prevents it from dominating reconstruction at the start of training. WAE-GAN keeps the previous L1 reconstruction loss unless its config opts into `regularizer.reconstruction_loss: bce_dice`.
+The default config generates 30,000 binary PNGs with a 20 m x 20 m physical
+domain, 50 fractures per image, fractal center locations, truncated power-law
+lengths, and a von Mises orientation distribution.
 
-For the 16D latent-space Flow Matching route, train a compact WAE first:
+## Train the WGAN-GP Baseline
 
 ```bash
-python src/training/train_wae.py --config configs/wae_mmd_16.yaml
+python src/training/train_wgan_gp.py \
+  --config configs/wgan_gp_128.yaml
 ```
 
-This produces `outputs/wae_mmd_16/checkpoints/wae_mmd_latest.pt`, which is the frozen encoder/decoder checkpoint used by the latent prior. Because this is a 16D vector bottleneck, reconstruction quality is the first limiting factor; inspect WAE reconstruction samples before judging the latent Flow Matching prior.
-
-## Train Latent Flow Matching
-
-```bash
-python src/training/train_latent_flow_matching.py --config configs/latent_flow_matching_16.yaml
-```
-
-For a quick smoke run after a WAE checkpoint exists:
-
-```bash
-python src/training/train_latent_flow_matching.py --config configs/latent_flow_matching_16.yaml --max_batches 1
-```
-
-The latent Flow Matching baseline freezes the WAE encoder and decoder. Training encodes each image as `z1 = E(x)` in `R^16`, samples Gaussian `z0`, interpolates `z_t = (1 - t) * z0 + t * z1`, and trains an MLP velocity field to predict `z1 - z0`. Sampling integrates the learned latent velocity field from Gaussian noise to generated latents, then decodes with `D(z)`.
-
-To resample from a trained latent Flow Matching checkpoint:
-
-```bash
-python src/sampling/sample_latent_flow_matching.py --config configs/latent_flow_matching_16.yaml --checkpoint outputs/latent_flow_matching_16/checkpoints/latent_flow_matching_latest.pt --num_images 256 --batch_size 64
-```
-
-## Train VQ-VAE
-
-```bash
-python src/training/train_vqvae.py --config configs/vqvae_128.yaml
-```
-
-For a quick smoke run:
-
-```bash
-python src/training/train_vqvae.py --config configs/vqvae_128.yaml --max_batches 1
-```
-
-The VQ-VAE config is set up for the Teng 50-fracture 128 x 128 binary DFN data. It encodes each image into a 16 x 16 grid of discrete codebook indices, applies straight-through vector quantization, and decodes the quantized features back to image space. Its reconstruction loss matches the binary-image setting:
+Default outputs:
 
 ```text
-reconstruction_loss = bce_weight * BCEWithLogits(probability_logits, target) + (1 - bce_weight) * DiceLoss(probability, target)
+outputs/samples/
+outputs/checkpoints/
+outputs/logs/train_log.csv
 ```
 
-The decoder still returns tanh-range images for compatibility with the shared image-grid and evaluator code, but the BCE term is computed from raw decoder logits for AMP-safe training. Random-code decode grids are disabled by default because VQ-VAE does not learn a latent prior by itself; enable `sampling.save_random_samples` only as a codebook sanity check.
+The WGAN-GP config uses a 128-dimensional latent vector, `base_channels: 64`,
+five critic updates per generator update, and gradient penalty
+`lambda_gp: 10`.
 
-## Train Legacy Flow Matching
+To evaluate the selected WGAN-GP sample grid used for the Teng-style table in
+the paper draft, run:
 
 ```bash
-python src/training/train_flow_matching.py --config configs/flow_matching_128.yaml
+python src/evaluation/evaluate_dfn.py \
+  --real_dir data/synthetic_dfn_teng_50_128/images \
+  --generated_grid outputs/samples/step_0014500_prob.png \
+  --out_dir outputs/evaluation/step_0014500_prob_vs_synthetic_dfn_teng_50_128 \
+  --max_real_images 512 \
+  --max_generated_images 64 \
+  --grid_rows 8 \
+  --grid_cols 8 \
+  --grid_padding 2
 ```
 
-For a quick smoke run:
+If the exact step is not present because training was stopped early or run with
+different sampling intervals, evaluate the nearest generated `*_binary.png` or
+`*_prob.png` grid and report the matching output directory.
+
+## Train Alternative Methods
+
+The paper draft compares WGAN-GP with several alternative methods on the same
+Teng-style 50-fracture dataset. The commands below reproduce the model outputs
+without using shell wrappers.
 
 ```bash
-python src/training/train_flow_matching.py --config configs/flow_matching_128.yaml --max_batches 1
+python src/training/train_wae.py \
+  --config configs/wae_mmd_16_corrected.yaml
+
+python src/training/train_wae.py \
+  --config configs/wae_mmd_32_structural_overdensity.yaml
+
+python src/training/train_beta_vae.py \
+  --config configs/beta_vae_16_capacity.yaml
+
+python src/training/train_sphere_encoder.py \
+  --config configs/sphere_encoder_16_structural.yaml
+
+python src/training/train_vqvae.py \
+  --config configs/vqvae_128.yaml
+
+python src/training/train_flow_matching.py \
+  --config configs/flow_matching_128.yaml
 ```
 
-The legacy Flow Matching baseline is an unconditional pixel-space Rectified Flow model. During training it samples Gaussian noise `x0`, real images `x1`, interpolates `x_t = (1 - t) * x0 + t * x1`, and trains a time-conditioned UNet to predict velocity `x1 - x0`. Sampling integrates the learned velocity field from noise at `t=0` to images at `t=1`; `sampler.solver` supports `euler`, `heun`, and `midpoint`.
+Notes for interpretation:
 
-Legacy Flow Matching sample grids use the same probability and binary PNG format as WGAN-GP and WAE.
+- WAE-MMD, beta-VAE, and Sphere Encoder produce both reconstruction grids and
+  prior-sample grids. The paper table uses prior-sample grids for generative
+  comparison.
+- VQ-VAE is reconstruction-only in the default config because no learned prior
+  over code indices is trained. Its reconstructions are useful diagnostics but
+  are not directly comparable to WGAN-GP samples as unconditional generation.
+- Pixel-space Flow Matching is a useful image generator baseline, but it does
+  not provide a compact latent parameterization for inversion.
 
-By default legacy Flow Matching samples training time `t` uniformly and keeps a fixed learning rate. To bias training time toward high-`t` denoising, set `training.time_sampling.distribution: beta` and tune `beta_alpha` / `beta_beta`. To enable warmup plus cosine learning-rate decay, set `training.scheduler.enabled: true`; older configs and checkpoints remain compatible when these fields are absent or disabled.
+## Reproduce the Alternative-Method Metrics
 
-To resample from a trained legacy Flow Matching `.pt` or Lightning `.ckpt` checkpoint, use:
+After training, evaluate the generated grids against the same reference set.
+The following commands reproduce the metrics table in the paper draft when run
+with the default configs and final sample grids.
 
 ```bash
-python src/sampling/sample_flow_matching.py --config configs/flow_matching_128.yaml --checkpoint outputs/flow_matching/checkpoints/flow_matching_latest.pt --num_images 256 --batch_size 32
+python src/evaluation/evaluate_dfn.py \
+  --real_dir data/synthetic_dfn_teng_50_128/images \
+  --generated_grid outputs/wae_mmd_16_corrected/samples/step_0093600_binary.png \
+  --out_dir outputs/evaluation/alternative_methods/wae_mmd_16_corrected_sample \
+  --max_real_images 512 \
+  --max_generated_images 64 \
+  --grid_rows 8 \
+  --grid_cols 8 \
+  --grid_padding 2
+
+python src/evaluation/evaluate_dfn.py \
+  --real_dir data/synthetic_dfn_teng_50_128/images \
+  --generated_grid outputs/wae_mmd_32_structural_overdensity/samples/step_0093600_binary.png \
+  --out_dir outputs/evaluation/alternative_methods/wae_mmd_32_overdensity_sample \
+  --max_real_images 512 \
+  --max_generated_images 64 \
+  --grid_rows 8 \
+  --grid_cols 8 \
+  --grid_padding 2
+
+python src/evaluation/evaluate_dfn.py \
+  --real_dir data/synthetic_dfn_teng_50_128/images \
+  --generated_grid outputs/beta_vae_16_capacity/samples/step_0093600_binary.png \
+  --out_dir outputs/evaluation/alternative_methods/beta_vae_16_capacity_sample \
+  --max_real_images 512 \
+  --max_generated_images 64 \
+  --grid_rows 8 \
+  --grid_cols 8 \
+  --grid_padding 2
+
+python src/evaluation/evaluate_dfn.py \
+  --real_dir data/synthetic_dfn_teng_50_128/images \
+  --generated_grid outputs/sphere_encoder_16_structural/samples/step_0093600_binary.png \
+  --out_dir outputs/evaluation/alternative_methods/sphere_encoder_16_structural_1step \
+  --max_real_images 512 \
+  --max_generated_images 64 \
+  --grid_rows 8 \
+  --grid_cols 8 \
+  --grid_padding 2
+
+python src/evaluation/evaluate_dfn.py \
+  --real_dir data/synthetic_dfn_teng_50_128/images \
+  --generated_grid outputs/flow_matching_teng_50H/samples/step_0093600_binary.png \
+  --out_dir outputs/evaluation/alternative_methods/flow_matching_legacy_sample \
+  --max_real_images 512 \
+  --max_generated_images 64 \
+  --grid_rows 8 \
+  --grid_cols 8 \
+  --grid_padding 2
 ```
 
-The default output is still a probability grid plus a binary grid. Add `--save_mode individual` to save one PNG per sample under separate `_prob` and `_binary` directories, or use `--save_mode both` to write both individual images and grids.
-
-## Optional Lightning Training
-
-Install dependencies from `requirements.txt`, then run:
+To evaluate VQ-VAE reconstructions for the reconstruction figure:
 
 ```bash
-python src/training/train_lightning.py --config configs/wgan_gp_128.yaml
-python src/training/train_lightning.py --config configs/wae_mmd_128.yaml
-python src/training/train_lightning.py --config configs/wae_gan_128.yaml
-python src/training/train_lightning.py --config configs/vqvae_128.yaml --model vqvae
-python src/training/train_lightning.py --config configs/flow_matching_128.yaml --model flow_matching_legacy
+python src/evaluation/evaluate_dfn.py \
+  --real_dir data/synthetic_dfn_teng_50_128/images \
+  --generated_grid outputs/vqvae_teng_50_128/samples/step_0093600_recon_binary.png \
+  --out_dir outputs/evaluation/alternative_methods/vqvae_recon \
+  --max_real_images 512 \
+  --max_generated_images 64 \
+  --grid_rows 8 \
+  --grid_cols 8 \
+  --grid_padding 2
 ```
 
-Lightning still accepts `--model flow_matching` as a backward-compatible alias for `flow_matching_legacy`. It uses the same `device: auto` setting and writes checkpoints, logs, and sample grids under `lightning/` subdirectories to avoid overwriting manual-training outputs.
-
-Lightning mixed precision is controlled by `training.precision`. The default is `32-true`; on CUDA Linux you can try `16-mixed` or `bf16-mixed` for AMP. Keep full precision on MPS unless a specific local PyTorch/Lightning build validates mixed precision for your workload.
-
-## Outputs
-
-Generated sample grids are saved in `D:/dfn_gan_outputs/dfn_gan_128/samples` as both probability grids and thresholded binary grids. Checkpoints are saved in `D:/dfn_gan_outputs/dfn_gan_128/checkpoints`, and CSV logs are written to `D:/dfn_gan_outputs/dfn_gan_128/logs/train_log.csv`.
-
-## Evaluate Generated DFNs
-
-Use the synthetic DFN dataset as the reference distribution, then compare it with a generated binary grid:
-
-```bash
-python src/evaluation/evaluate_dfn.py ^
-  --real_dir data/synthetic_dfn_128/images ^
-  --generated_grid D:/dfn_gan_outputs/dfn_gan_128/samples/step_0010000_binary.png ^
-  --out_dir D:/dfn_gan_outputs/dfn_gan_128/evaluation/step_0010000
-```
-
-On Linux/macOS, replace `^` with `\`.
-
-The evaluator writes:
+Each evaluation directory contains:
 
 ```text
+comparison_metrics.csv
 metrics_reference.csv
 metrics_generated.csv
-comparison_metrics.csv
 summary.json
 comparison_plots.png
+overlay_comparison.png
+overlay_reference.png
+overlay_generated.png
+overlay_abs_difference.png
+center_heatmap_comparison.png
 ```
 
-Current metrics include fracture pixel ratio, connected component count, largest component ratio, mean component area, skeleton length, endpoint count, junction count, Hough line count, and orientation histogram distance.
+These files are the numerical and visual sources for the metric table,
+statistical evaluation figure, occurrence overlay figure, and alternative-method
+comparison in the paper draft.
 
-## Resume Training
+## Optional Lightning Entry Point
+
+Most models have standalone trainers. If a Lightning workflow is preferred, use
+the tracked Lightning entry point directly:
 
 ```bash
-python src/training/train_wgan_gp.py --config configs/wgan_gp_128.yaml --resume D:/dfn_gan_outputs/dfn_gan_128/checkpoints/wgan_gp_latest.pt
+python src/training/train_lightning.py \
+  --config configs/wgan_gp_128.yaml \
+  --model wgan_gp
+
+python src/training/train_lightning.py \
+  --config configs/vqvae_128.yaml \
+  --model vqvae
+
+python src/training/train_lightning.py \
+  --config configs/flow_matching_128.yaml \
+  --model flow_matching_legacy
 ```
 
-## Future Extensions
+Lightning writes sample grids, checkpoints, and logs under `lightning/`
+subdirectories to avoid overwriting standalone-training outputs.
 
-Useful DFN-specific evaluation metrics can be added later, such as fracture length distribution, orientation distribution, connected component counts, percolation probability, and MMD.
+## Latent Flow Matching
+
+Latent Flow Matching is a two-stage baseline: first train a compact WAE, then
+freeze its encoder and decoder while training a latent velocity model.
+
+```bash
+python src/training/train_wae.py \
+  --config configs/wae_mmd_16.yaml
+
+python src/training/train_latent_flow_matching.py \
+  --config configs/latent_flow_matching_16.yaml
+```
+
+To sample from a trained latent Flow Matching checkpoint:
+
+```bash
+python src/sampling/sample_latent_flow_matching.py \
+  --config configs/latent_flow_matching_16.yaml \
+  --checkpoint outputs/latent_flow_matching_16/checkpoints/latent_flow_matching_latest.pt \
+  --num_images 64 \
+  --batch_size 64 \
+  --save_mode grid
+```
+
+## One-Step Inversion Workflow
+
+The inversion code links a latent DFN generator to pressure-response comparison.
+The default inversion config uses a deterministic mock pressure forward model,
+so it can run without GEOS.
+
+First train or provide the conditioned WGAN-GP prior expected by the inversion
+config:
+
+```bash
+python src/training/train_wgan_gp.py \
+  --config configs/wgan_gp_teng_conditioned_case1_ld16.yaml
+```
+
+Then generate a synthetic pressure-observation case:
+
+```bash
+python src/inversion/make_synthetic_pressure_case.py \
+  --config configs/inversion/teng_pressure_ld16.yaml
+```
+
+Run latent-space inversion with the default sampler:
+
+```bash
+python src/inversion/run_mcmc.py \
+  --config configs/inversion/teng_pressure_ld16.yaml \
+  --sampler emcee
+```
+
+For a quick smoke test:
+
+```bash
+python src/inversion/run_mcmc.py \
+  --config configs/inversion/teng_pressure_ld16.yaml \
+  --sampler emcee \
+  --max_steps 5
+```
+
+Inversion outputs are written under:
+
+```text
+outputs/inversion/teng_pressure_ld16/
+```
+
+The optional GEOS/EDFM path is configured by
+`configs/inversion/teng_pressure_ld16_geos.yaml`. It requires a local GEOS
+executable and template directory, so it is not part of the default
+repository-only reproduction path.
+
+## Rebuild Paper Figures and Tables
+
+The paper draft figures are assembled from the artifacts above:
+
+- Synthetic data examples: `data/synthetic_dfn_teng_50_128/images/`
+- WGAN-GP sample grids: `outputs/samples/*_binary.png` and
+  `outputs/samples/*_prob.png`
+- Evaluation plots and overlays: `outputs/evaluation/**/comparison_plots.png`,
+  `overlay_comparison.png`, and `center_heatmap_comparison.png`
+- Alternative-method sample or reconstruction grids:
+  `outputs/*/samples/*_binary.png` and `outputs/*/samples/*_recon_binary.png`
+- Inversion artifacts:
+  `outputs/inversion/teng_pressure_ld16/**/best_pressure_prediction.csv`,
+  `best_binary.png`, and `best_summary.json`
+
+The metric table is populated from each evaluation directory's
+`comparison_metrics.csv`. Use the generated/reference means for scalar metrics
+and the reported generated value for orientation `L1` distance.
+
+## Fast Sanity Checks
+
+Use small smoke runs before launching full 200-epoch jobs:
+
+```bash
+python src/generate_synthetic_dfn.py \
+  --config configs/dataset/teng_unconditioned_50_128.yaml \
+  --num_samples 16 \
+  --out_dir /tmp/dfn_smoke
+
+python src/training/train_wae.py \
+  --config configs/wae_mmd_16_corrected.yaml \
+  --max_batches 1
+
+python src/training/train_beta_vae.py \
+  --config configs/beta_vae_16_capacity.yaml \
+  --max_batches 1
+
+python src/training/train_sphere_encoder.py \
+  --config configs/sphere_encoder_16_structural.yaml \
+  --max_batches 1
+
+python src/training/train_vqvae.py \
+  --config configs/vqvae_128.yaml \
+  --max_batches 1
+
+python src/training/train_flow_matching.py \
+  --config configs/flow_matching_128.yaml \
+  --max_batches 1
+```
+
+## Reproducibility Notes
+
+- Run commands from the repository root.
+- Keep the YAML configs unchanged when reproducing paper numbers.
+- Use the same generated grid when comparing metric values; different training
+  steps or probability-versus-binary grids produce different statistics.
+- VQ-VAE reconstructions should be discussed separately from generated samples
+  unless a learned code prior is added.
+- Image-level metrics are useful diagnostics, but they do not prove hydraulic
+  equivalence. Use the inversion workflow for pressure-response comparisons.
